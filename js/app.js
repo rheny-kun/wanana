@@ -10,10 +10,11 @@
   const batteryTones = { NORMAL: "ok", LOW: "warning", CRITICAL: "danger", INVALID: "neutral" };
   const temperatureTones = { NORMAL: "ok", WARM: "warning", HOT: "hot", CRITICAL: "danger", INVALID: "neutral" };
   const eventTones = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "danger", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", RECEIVER_BOOT: "purple", RECEIVER_HEALTH: "cyan", UNKNOWN: "neutral" };
+  const logFields = ["timestamp", "node", "sessionId", "event", "sensor", "battery", "batteryStatus", "temperature", "temperatureStatus", "messageId", "boot", "send", "wifiRssi", "loraRssi"];
   const chartDefinitions = [
-    { key: "battery", label: "Battery Voltage", unit: "V", color: "#8ac69b", empty: "Batteryデータなし" },
-    { key: "temperature", label: "Temperature", unit: "℃", color: "#d6ad72", empty: "Temperatureデータなし" },
-    { key: "lora", field: "loraRssi", label: "LoRa RSSI", unit: "dBm", color: "#86bed6", empty: "LoRa RSSIデータなし" }
+    { key: "battery", label: "Battery Voltage", unit: "V", empty: "Batteryデータなし" },
+    { key: "temperature", label: "Temperature", unit: "℃", empty: "Temperatureデータなし" },
+    { key: "lora", field: "loraRssi", label: "LoRa RSSI", unit: "dBm", empty: "LoRa RSSIデータなし" }
   ];
   const charts = new Map();
   let logs = [];
@@ -71,12 +72,14 @@
 
   function normalize(data) {
     if (!Array.isArray(data)) throw new Error("APIの応答はJSON配列である必要があります。");
-    const rows = data.filter((row) => row !== null && typeof row === "object" && !Array.isArray(row));
-    if (data.length && !rows.length) throw new Error("応答に有効なログオブジェクトがありません。");
+    const rows = data.filter((row) => row !== null && typeof row === "object" && !Array.isArray(row)
+      && logFields.every((field) => Object.hasOwn(row, field))
+      && typeof row.node === "string" && row.node.trim() && row.node.length <= 200);
+    if (data.length && !rows.length) throw new Error("応答に有効な14フィールドのログがありません。");
     const normalized = rows.map((row) => ({
       timestamp: parseTimestamp(row.timestamp),
       sessionId: sessionId(row.sessionId),
-      node: typeof row.node === "string" && row.node.trim() ? row.node.slice(0, 200) : "-",
+      node: row.node,
       sensor: row.sensor === "OPEN" || row.sensor === "CLOSED" ? row.sensor : "UNKNOWN",
       event: known(row.event, eventTones, "UNKNOWN"),
       battery: number(row.battery),
@@ -124,8 +127,8 @@
   }
 
   function nodeState(log) {
+    if (!log || log.timestamp === null || log.sessionId === null) return "UNKNOWN";
     if (!isReceiver(log)) return log?.sensor ?? "UNKNOWN";
-    if (log.timestamp === null) return "UNKNOWN";
     return Date.now() - log.timestamp >= warningThreshold(log) ? "OFFLINE" : "ONLINE";
   }
 
@@ -147,9 +150,9 @@
 
   function updateNodes() {
     latestByNode = new Map();
+    // logs is already sorted newest first.
     for (const log of logs) {
-      const previous = latestByNode.get(log.node);
-      if (!previous || (log.timestamp ?? -Infinity) > (previous.timestamp ?? -Infinity)) latestByNode.set(log.node, log);
+      if (!latestByNode.has(log.node)) latestByNode.set(log.node, log);
     }
     if (firstSelection) {
       selectedNode = requestedNode || null;
@@ -157,6 +160,7 @@
     }
     if (!latestByNode.has(selectedNode)) selectedNode = null;
     renderNodeChips();
+    renderOverview();
     updateUrl();
   }
 
@@ -264,7 +268,6 @@
     byId("all-overview").hidden = !all;
     byId("single-overview").hidden = false;
     byId("detail-section").hidden = false;
-    renderOverview();
     renderNodeStates();
     byId("node-value").textContent = latest?.node ?? "-";
     setReceivedTime(byId("last-received"), latest);
@@ -316,7 +319,7 @@
       messages.push({ text: `${log.node} · ${message}`, danger });
     }
     for (const latest of targets) {
-      if (!isReceiver(latest) && latest.sensor === "OPEN") add(latest, "状態：OPEN。", true);
+      if (nodeState(latest) === "OPEN") add(latest, "状態：OPEN。", true);
       if (latest.timestamp === null) {
         add(latest, "受信日時が不明です。無通信時間を判定できません。");
       } else {
@@ -324,8 +327,8 @@
         if (age < 0) add(latest, "受信日時が未来です。記録時刻を確認してください。");
         if (age >= warningThreshold(latest)) add(latest, `無通信警告：最終受信から${Math.floor(age / 60000)}分経過しています。`, true);
       }
-      if (["LOW", "CRITICAL"].includes(latest.batteryStatus)) add(latest, `電池警告：${latest.batteryStatus}。電池を確認してください。`, latest.batteryStatus === "CRITICAL");
-      if (["HOT", "CRITICAL"].includes(latest.temperatureStatus)) add(latest, `温度警告：${latest.temperatureStatus}。`, latest.temperatureStatus === "CRITICAL");
+      if (latest.battery !== null && ["LOW", "CRITICAL"].includes(latest.batteryStatus)) add(latest, `電池警告：${latest.batteryStatus}。電池を確認してください。`, latest.batteryStatus === "CRITICAL");
+      if (latest.temperature !== null && ["HOT", "CRITICAL"].includes(latest.temperatureStatus)) add(latest, `温度警告：${latest.temperatureStatus}。`, latest.temperatureStatus === "CRITICAL");
     }
     byId("received-age").textContent = receivedAge(latestByNode.get(focusNode));
     // 同じ警告を毎秒aria-liveへ再挿入しない。
@@ -403,14 +406,23 @@
     const nodes = (all ? [...latestByNode.keys()] : [selectedNode])
       .filter((node) => !node.startsWith("receiver-"))
       .sort((a, b) => a.localeCompare(b, "ja", { numeric: true }));
-    const nodeSet = new Set(nodes);
-    const filtered = logs.filter((log) => nodeSet.has(log.node) && latestSessionId(log.node) !== null && log.sessionId === latestSessionId(log.node));
+    const sessions = new Map(nodes.map((node) => [node, latestSessionId(node)]));
+    const series = new Map(nodes.map((node) => [node, []]));
+    let invalidDates = 0;
+    // Group once in chronological order for all three charts.
+    for (let index = logs.length - 1; index >= 0; index--) {
+      const log = logs[index];
+      if (!series.has(log.node) || log.sessionId === null || log.sessionId !== sessions.get(log.node)) continue;
+      if (log.timestamp === null) invalidDates++;
+      else series.get(log.node).push(log);
+    }
     byId("chart-section").hidden = selectedNode !== null && isReceiver(latestByNode.get(selectedNode));
     byId("chart-grid").classList.toggle("comparison", all);
     const notes = [];
-    const invalidDates = filtered.filter((log) => log.timestamp === null).length;
     if (invalidDates) notes.push(`日時不明の${invalidDates}件は履歴末尾に表示し、グラフから除外しています。`);
-    if (invalidRows) notes.push(`ログオブジェクトではない${invalidRows}件を除外しました。`);
+    if (invalidRows) notes.push(`不正なログ${invalidRows}件を除外しました。`);
+    const missingSessions = visibleLogs().filter((log) => log.sessionId === null).length;
+    if (missingSessions) notes.push(`Session不明の${missingSessions}件はグラフから除外しています。`);
     const available = typeof window.Chart === "function";
     if (!available) notes.push("グラフを読み込めません。接続を確認してください。");
     for (const definition of chartDefinitions) {
@@ -419,9 +431,7 @@
       const datasets = nodes.map((node) => {
         const color = nodeColor(node);
         // Node間の時刻を揃えず、各点に実際のUnix時刻（ms）を持たせる。
-        const data = [...filtered].reverse()
-          .filter((log) => log.node === node && log.timestamp !== null)
-          .map((log) => ({ x: log.timestamp, y: log[definition.field ?? definition.key] }));
+        const data = series.get(node).map((log) => ({ x: log.timestamp, y: log[definition.field ?? definition.key] }));
         return {
           label: node, data, borderColor: color, backgroundColor: `${color}0c`,
           borderWidth: 1.8, fill: !all, pointRadius: data.length === 1 ? 3 : 1,
@@ -512,6 +522,7 @@
     busy = true;
     byId("refresh-button").setAttribute("aria-busy", "true");
     byId("refresh-button").disabled = true;
+    byId("refresh-button").textContent = "更新中…";
     if (lastSuccess === null) byId("update-status").textContent = "取得中…";
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15000);
@@ -525,7 +536,7 @@
         url.searchParams.set("action", "logs");
         url.searchParams.set("limit", String(config.MAX_LOGS));
         phase = "network";
-        const response = await fetch(url.href, { signal: controller.signal, cache: "no-store", credentials: "omit" });
+        const response = await fetch(url.href, { signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "follow" });
         phase = "http";
         if (!response.ok) throw new Error(`API HTTP ${response.status}`);
         phase = "json";
@@ -553,6 +564,7 @@
       busy = false;
       byId("refresh-button").setAttribute("aria-busy", "false");
       byId("refresh-button").disabled = false;
+      byId("refresh-button").textContent = "更新";
     }
   }
 

@@ -241,12 +241,11 @@ td { padding-top: 6px; padding-bottom: 6px; }
 @media (max-width: 540px) {
   .site-header { min-height: 58px; padding: 5px 0; }
   .brand h1 { font-size: 1.12rem; }
-  .header-tools { display: block; }
-  .header-tools { position: relative; }
-  .header-actions { gap: 7px; }
-  #current-clock { align-self: flex-start; padding-top: 3px; }
-  .update-status { position: absolute; left: 0; bottom: 1px; max-width: calc(100% - 56px); margin-top: 0; line-height: 1.2; font-size: .56rem; text-align: left; white-space: nowrap; }
-  #refresh-button { min-height: 44px; padding-top: 5px; padding-bottom: 5px; }
+  .header-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 7px; align-items: center; }
+  .header-actions { display: contents; }
+  #current-clock { grid-column: 1; grid-row: 1; align-self: end; }
+  .update-status { grid-column: 1; grid-row: 2; align-self: start; max-width: none; margin: 0; line-height: 1.2; font-size: .6rem; text-align: right; white-space: nowrap; }
+  #refresh-button { grid-column: 2; grid-row: 1 / span 2; min-height: 44px; padding-top: 5px; padding-bottom: 5px; }
   .sensor-card { padding: 11px 14px; }
   .sensor-value { font-size: 2.7rem; }
   .metric-cell { padding: 10px 12px; }

@@ -46,7 +46,7 @@
       }
       // この関数は検証対象iframeでだけ実行する。
       function bootstrap(config, rows, options, fixedNow) {
-        const state = window.__test = { rows, mode: "ok", calls: [], intervals: [], errors: [], consoleErrors: [], shift: 0, generation: options.generation, search: options.search ?? "", url: "" };
+        const state = window.__test = { rows, mode: options.mode ?? "ok", calls: [], intervals: [], errors: [], consoleErrors: [], shift: 0, generation: options.generation, search: options.search ?? "", url: "", urlWrites: 0 };
         window.WANANA_CONFIG = config;
         // srcdoc内でURL選択を検証する。テストiframe以外のURL・履歴は変更しない。
         const NativeParams = window.URLSearchParams;
@@ -58,6 +58,7 @@
           constructor(value, base) { super(value === window.location.href ? "https://example.invalid/dashboard/" + state.search : value, base); }
         };
         window.history.replaceState = (data, title, url) => {
+          state.urlWrites++;
           state.url = String(url);
           state.search = new NativeURL(url).search;
         };
@@ -71,7 +72,7 @@
         if (options.fastTimeout) window.setTimeout = (callback, ms) => originalTimeout(callback, ms === 15000 ? 20 : ms);
         const nativeFetch = window.fetch.bind(window);
         window.fetch = async (url, request) => {
-          state.calls.push({ url, credentials: request.credentials, cache: request.cache });
+          state.calls.push({ url, credentials: request.credentials, cache: request.cache, redirect: request.redirect, signal: request.signal });
           if (options.httpFixture) {
             const target = new NativeURL(options.fixturePath ?? "./api", options.fixtureBase);
             target.search = new NativeURL(url).search;
@@ -81,6 +82,11 @@
           }
           if (state.mode === "network") throw new Error("検証用ネットワークエラー");
           if (state.mode === "timeout") return new Promise((resolve, reject) => request.signal.addEventListener("abort", () => reject(new DOMException("検証用タイムアウト", "AbortError"))));
+          if (state.mode === "pending") {
+            const snapshot = state.rows;
+            return new Promise((resolve) => { state.resolvePending = () => resolve({ ok: true, json: async () => snapshot }); });
+          }
+          if (state.mode === "body-timeout") return { ok: true, json: () => new Promise((resolve, reject) => request.signal.addEventListener("abort", () => reject(new DOMException("検証用タイムアウト", "AbortError")))) };
           return { ok: state.mode !== "http", status: state.mode === "http" ? 503 : 200, json: async () => { if (state.mode === "json") throw new SyntaxError("検証用JSONエラー"); return state.rows; } };
         };
       }
@@ -93,7 +99,7 @@
         doc.head.prepend(base);
         doc.querySelector('script[src="./js/config.js"]').remove();
         const setup = doc.createElement("script");
-        const config = { ...window.WANANA_CONFIG, GAS_READ_API_URL: options.unconfigured ? "YOUR_PUBLIC_GAS_READ_API_URL_HERE" : "https://example.invalid/read", USE_DEMO_DATA: false };
+        const config = { ...window.WANANA_CONFIG, GAS_READ_API_URL: options.unconfigured ? "YOUR_PUBLIC_GAS_READ_API_URL_HERE" : options.apiUrl ?? "https://example.invalid/read", USE_DEMO_DATA: false };
         const safeJson = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
         setup.textContent = `(${bootstrap.toString()})(${safeJson(config)},${safeJson(rows)},${safeJson(options)},${now});`;
         doc.head.insertBefore(setup, doc.querySelector("script"));
@@ -101,7 +107,7 @@
         frame.srcdoc = "<!doctype html>\n" + doc.documentElement.outerHTML;
         await until(() => {
           const document = frame.contentDocument;
-          return frame.contentWindow?.__test?.generation === options.generation && document?.getElementById("update-status")?.textContent.match(options.expectFailure ? /未取得/ : /最終更新|未接続/) && document.getElementById("refresh-button").disabled === Boolean(options.unconfigured);
+          return frame.contentWindow?.__test?.generation === options.generation && document?.getElementById("update-status")?.textContent.match(options.expectFailure ? /未取得/ : /最終更新|未接続/) && document.getElementById("refresh-button").disabled === Boolean(options.unconfigured) && (!options.expectFailure || frame.contentWindow.__test.consoleErrors.length === 1);
         });
         const win = frame.contentWindow;
         assert(!win.__test.errors.length, win.__test.errors.join("\n"));
@@ -584,7 +590,7 @@
             const missing = log({ timestamp: timestamp(now - 1000) }); delete missing.sessionId;
             const win = await open([log({ sessionId: "100" }), missing, log({ sessionId: null, timestamp: timestamp(now - 2000) })]);
             assert(dataset(win, "battery", "trap-01").data.length === 1, "session欠損を現在sessionへ混ぜました");
-            win.__test.shift = 1000; win.__test.rows = [{ ...missing, timestamp: timestamp(now + 1000) }, log({ sessionId: "100" })]; await refresh(win);
+            win.__test.shift = 1000; win.__test.rows = [log({ sessionId: null, timestamp: timestamp(now + 1000) }), log({ sessionId: "100" })]; await refresh(win);
             assert(text(win, "session-value") === "—" && !chart(win, "battery-chart") && text(win, "history-count") === "直近2件", "最新session不明時に旧sessionを代用しました");
           });
           await test("Session：receiver再起動session更新でもONLINE・推移非表示", async () => {
@@ -660,6 +666,102 @@
           await test("実HTTP：503はHTTP分類・エラー表示・デモへfallbackしない", async () => {
             const win = await open([], { httpFixture: true, fixtureBase: new URL("./", location.href).href, fixturePath: "./api-fail", expectFailure: true });
             assert(visible(win, "update-error") && !visible(win, "demo-notice") && win.__test.consoleErrors[0].includes("[http]"), "HTTP失敗の分類/表示が不正");
+          });
+          await test("14フィールド：欠けた行・不正Nodeだけを除外し正常行を保持", async () => {
+            const incomplete = Object.keys(log()).map((key) => { const row = log(); delete row[key]; return row; });
+            const invalid = [null, [], 42, {}, log({ node: " " }), log({ node: false }), log({ node: "x".repeat(201) })];
+            const win = await open([log(), ...incomplete, ...invalid]);
+            assert(text(win, "history-count") === "直近1件" && chips(win).length === 2 && text(win, "node-value") === "trap-01", "不完全な行を有効扱いしました");
+            assert(text(win, "data-note").includes("21件") && !visible(win, "update-error"), "部分除外の表示が不正");
+          });
+          await test("全行不正：前回状態・履歴・グラフを保持しvalidation失敗", async () => {
+            const win = await open([log()]);
+            const previous = text(win, "history-body"), instance = chart(win, "battery-chart");
+            win.__test.rows = [{}, { node: "trap-02" }, null]; await refresh(win);
+            assert(visible(win, "update-error") && text(win, "sensor-value") === "CLOSED" && text(win, "history-body") === previous && chart(win, "battery-chart") === instance, "不正応答で前回表示を失いました");
+            assert(win.__test.consoleErrors.at(-1).includes("[validation]"), "validation分類がありません");
+          });
+          await test("不正Session：UNKNOWN・説明表示・旧sessionへのfallbackなし", async () => {
+            for (const sessionId of [null, " ", {}, Number.MAX_SAFE_INTEGER + 1]) {
+              const win = await open([log({ sessionId, timestamp: timestamp() }), log({ sessionId: "old", timestamp: timestamp(now - 1000) })]);
+              assert(text(win, "session-value") === "—" && text(win, "sensor-value") === "UNKNOWN" && !chart(win, "battery-chart"), "不正Sessionを正常扱いしました");
+              assert(text(win, "data-note").includes("Session不明") && text(win, "history-count") === "直近2件", "不正Sessionの説明か履歴がありません");
+            }
+          });
+          await test("不正timestamp：現在状態はUNKNOWN・ISO offsetと閏日も検証", async () => {
+            for (const value of ["2026-02-29 12:00:00", "2026-11-06T12:00:00+24:00", "2026-11-06T24:00:00Z", "2026-11-06 23:59:60"]) {
+              const win = await open([log({ timestamp: value })]);
+              assert(text(win, "sensor-value") === "UNKNOWN" && text(win, "last-received") === "日時不明" && !chart(win, "battery-chart"), "不正timestampを正常扱いしました");
+            }
+            const win = await open([log({ timestamp: new Date(now).toISOString() })]);
+            assert(text(win, "last-received") === timestamp(), "ISOとJSTの時刻が一致しません");
+          });
+          await test("null計測値：INVALIDと警告の整合・receiver空文字を許容", async () => {
+            const win = await open([log({ battery: null, batteryStatus: "CRITICAL", temperature: "", temperatureStatus: "HOT" })]);
+            assert(text(win, "battery-status") === "INVALID" && text(win, "temperature-status") === "INVALID" && !visible(win, "alerts"), "計測値がないのに値の警告を出しました");
+            win.__test.rows = [receiverLog({ sensor: "", battery: "", batteryStatus: "", temperature: "", temperatureStatus: "", loraRssi: "" })]; await refresh(win);
+            assert(text(win, "sensor-value") === "ONLINE" && text(win, "wifi-value") === "-33" && text(win, "battery-value") === "—" && !visible(win, "alerts"), "receiverの空文字をrejectしました");
+          });
+          for (const [mode, category] of [["network", "network"], ["http", "http"], ["json", "json"], ["ok", "validation"], ["timeout", "timeout"], ["body-timeout", "timeout"]]) await test("初回失敗：" + category + "/" + mode + "・空状態・分類・復旧", async () => {
+            const win = await open(mode === "ok" ? {} : [log()], { mode, expectFailure: true, fastTimeout: true });
+            assert(text(win, "sensor-value") === "UNKNOWN" && text(win, "history-count") === "直近0件" && visible(win, "update-error") && !visible(win, "demo-notice"), "初回失敗の表示が不正");
+            assert(win.__test.consoleErrors[0].includes("[" + category + "]") && !win.document.getElementById("refresh-button").disabled, "分類またはbusy解除が不正");
+            win.__test.mode = "ok"; win.__test.rows = [log()]; await refresh(win);
+            assert(text(win, "sensor-value") === "CLOSED" && !visible(win, "update-error"), "失敗後に復旧しません");
+          });
+          await test("URL生成：既存queryとhashを維持しaction/limitだけ置換", async () => {
+            const win = await open([log()], { apiUrl: "https://example.invalid/read?view=1&action=old&limit=2#part" });
+            const request = win.__test.calls[0], url = new URL(request.url);
+            assert(url.searchParams.get("action") === "logs" && url.searchParams.getAll("action").length === 1 && url.searchParams.get("limit") === "1000" && url.searchParams.get("view") === "1" && url.hash === "#part", "URLの生成が不正");
+            assert(request.cache === "no-store" && request.credentials === "omit" && request.redirect === "follow" && !request.signal.aborted, "fetch設定が不正");
+          });
+          await test("更新競合：手動・timer・visibilityを同時発火してもfetchは1つ", async () => {
+            const win = await open([log()]);
+            const before = win.__test.calls.length;
+            win.__test.mode = "pending"; win.__test.rows = [log({ sensor: "OPEN", sessionId: "new" })];
+            win.document.getElementById("refresh-button").click();
+            win.__test.intervals.find((timer) => timer.ms === 60000).callback();
+            win.document.dispatchEvent(new win.Event("visibilitychange"));
+            assert(win.__test.calls.length === before + 1 && text(win, "sensor-value") === "CLOSED", "二重取得または表示競合が起きました");
+            win.__test.resolvePending();
+            await until(() => !win.document.getElementById("refresh-button").disabled);
+            assert(text(win, "sensor-value") === "OPEN" && text(win, "session-value") === "new", "待機中リクエストが反映されません");
+            assert(win.__test.intervals.length === 2 && win.__test.calls[0].signal !== win.__test.calls[1].signal, "timerかAbortControllerを再利用しています");
+          });
+          await test("Mobile header：320/375/390/430pxで更新時刻とbuttonが重ならない", async () => {
+            for (const width of [320, 375, 390, 430]) {
+              const win = await open([log()], {}, width);
+              for (const pending of [false, true]) {
+                if (pending) { win.__test.mode = "pending"; win.document.getElementById("refresh-button").click(); }
+                const status = win.document.getElementById("update-status"), button = win.document.getElementById("refresh-button");
+                const clockRect = win.document.getElementById("current-clock").getBoundingClientRect(), statusRect = status.getBoundingClientRect(), buttonRect = button.getBoundingClientRect();
+                assert(status.scrollWidth <= status.clientWidth + 1 && statusRect.right + 6 <= buttonRect.left && clockRect.bottom <= statusRect.top, "更新時刻がbuttonか時計と重なっています");
+                assert(buttonRect.height >= 44 && win.document.documentElement.scrollWidth <= win.innerWidth && button.textContent === (pending ? "更新中…" : "更新"), "更新フィードバックかレイアウトが不正");
+                if (pending) { win.__test.resolvePending(); await until(() => !button.disabled); }
+              }
+            }
+          });
+          await test("1000件・連続更新とNode切替：3instanceを再利用し破棄・再作成", async () => {
+            const rows = Array.from({ length: 1000 }, (_, i) => log({ node: "trap-" + String(i % 10 + 1).padStart(2, "0"), sessionId: i < 500 ? "new" : "old", timestamp: timestamp(now - i * 1000), loraRssi: i % 11 === 0 ? null : -87 }));
+            const started = performance.now();
+            const win = await open(rows);
+            const instances = ["battery", "temperature", "lora"].map((key) => chart(win, key + "-chart"));
+            assert(instances.every((instance) => instance.data.datasets.length === 10 && instance.data.datasets.every((series) => series.data.length === 50)), "Node別最新sessionの全点がありません");
+            for (let i = 0; i < 10; i++) {
+              await refresh(win); choose(win, "trap-01"); choose(win, "");
+              assert(Object.keys(win.Chart.instances).length === 3 && instances.every((instance) => win.Chart.getChart(instance.canvas) === instance), "chart instanceが増えました");
+            }
+            assert(win.__test.intervals.length === 2 && win.__test.calls.length === 11, "timerかfetchが増えました");
+            const writes = win.__test.urlWrites;
+            choose(win, "trap-02");
+            assert(win.__test.urlWrites === writes + 1 && activeNode(win) === "trap-02", "click listenerが重複しました");
+            choose(win, "");
+            win.__test.rows = [receiverLog()]; await refresh(win);
+            choose(win, "receiver-01");
+            assert(Object.keys(win.Chart.instances).length === 0 && !visible(win, "chart-section"), "receiver切替でinstanceが残りました");
+            win.__test.rows = rows; await refresh(win);
+            assert(Object.keys(win.Chart.instances).length === 3 && text(win, "history-count") === "直近50件", "再作成または履歴上限が不正");
+            results.textContent += `INFO 1000件・10回更新・Node切替: ${Math.round(performance.now() - started)} ms\n`;
           });
         } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }
         finally { summary.textContent = `完了：${passed} PASS / ${failed} FAIL`; button.disabled = false; }
