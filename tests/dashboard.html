@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>わなな — ブラウザー検証</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../css/style.css">
+  <script src="../js/config.js"></script>
+  <style>
+    .test-shell { padding: 24px; } .test-shell h1 { margin-bottom: 16px; }
+    #results { margin: 16px 0; padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; background: #161a21; border: 1px solid #303744; border-radius: 8px; }
+    #test-frame { display: block; height: 900px; border: 1px solid #303744; background: #0d1015; }
+    .frame-scroll { overflow: auto; margin-top: 16px; } #summary { margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <main class="test-shell">
+    <h1>わなな / ブラウザー検証</h1>
+    <p>実画面・実Chart.jsで検証します。APIと時計はiframe内だけで差し替えます。</p>
+    <button id="run" type="button">検証を実行</button>
+    <p id="summary" role="status">未実行</p>
+    <pre id="results" aria-live="polite"></pre>
+    <div class="frame-scroll"><iframe id="test-frame" title="検証対象のダッシュボード" width="1100"></iframe></div>
+  </main>
+  <script>
+    "use strict";
+    (() => {
+      const frame = document.getElementById("test-frame");
+      const results = document.getElementById("results");
+      const summary = document.getElementById("summary");
+      const now = Math.floor(Date.now() / 1000) * 1000;
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      let source = "";
+      let passed = 0;
+      let failed = 0;
+      let generation = 0;
+      function assert(condition, message) { if (!condition) throw new Error(message); }
+      async function until(condition) {
+        const deadline = Date.now() + 12000;
+        while (!condition()) { if (Date.now() > deadline) throw new Error("画面更新の待機時間を超えました"); await pause(25); }
+      }
+      function timestamp(ms = now) { return new Date(ms + 9 * 3600000).toISOString().slice(0, 19).replace("T", " "); }
+      function log(overrides = {}) {
+        return { timestamp: timestamp(), node: "trap-01", sessionId: "test-session", event: "HEALTH_TIMER", sensor: "CLOSED", battery: 8.136, batteryStatus: "NORMAL", temperature: 20.3, temperatureStatus: "NORMAL", messageId: 11, boot: 10, send: 11, wifiRssi: -29, loraRssi: -87, ...overrides };
+      }
+      // この関数は検証対象iframeでだけ実行する。
+      function bootstrap(config, rows, options, fixedNow) {
+        const state = window.__test = { rows, mode: "ok", calls: [], intervals: [], errors: [], consoleErrors: [], shift: 0, generation: options.generation, search: options.search ?? "", url: "" };
+        window.WANANA_CONFIG = config;
+        // srcdoc内でURL選択を検証する。テストiframe以外のURL・履歴は変更しない。
+        const NativeParams = window.URLSearchParams;
+        const NativeURL = window.URL;
+        window.URLSearchParams = class extends NativeParams {
+          constructor(value) { super(value === window.location.search ? state.search : value); }
+        };
+        window.URL = class extends NativeURL {
+          constructor(value, base) { super(value === window.location.href ? "https://example.invalid/dashboard/" + state.search : value, base); }
+        };
+        window.history.replaceState = (data, title, url) => {
+          state.url = String(url);
+          state.search = new NativeURL(url).search;
+        };
+        Date.now = () => fixedNow + state.shift;
+        window.addEventListener("error", (event) => { state.errors.push(event.message || "リソース読込エラー"); });
+        window.addEventListener("unhandledrejection", (event) => { state.errors.push(String(event.reason)); });
+        console.error = (...args) => { state.consoleErrors.push(args.map(String).join(" ")); };
+        window.setInterval = (callback, ms) => { state.intervals.push({ callback, ms }); return state.intervals.length; };
+        if (options.noChart) window.addEventListener("DOMContentLoaded", () => { window.Chart = undefined; });
+        const originalTimeout = window.setTimeout;
+        if (options.fastTimeout) window.setTimeout = (callback, ms) => originalTimeout(callback, ms === 15000 ? 20 : ms);
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async (url, request) => {
+          state.calls.push({ url, credentials: request.credentials, cache: request.cache });
+          if (options.httpFixture) {
+            const target = new NativeURL(options.fixturePath ?? "./api", options.fixtureBase);
+            target.search = new NativeURL(url).search;
+            const response = await nativeFetch(target.href, request);
+            state.http = { status: response.status, redirected: response.redirected, contentType: response.headers.get("content-type") };
+            return response;
+          }
+          if (state.mode === "network") throw new Error("検証用ネットワークエラー");
+          if (state.mode === "timeout") return new Promise((resolve, reject) => request.signal.addEventListener("abort", () => reject(new DOMException("検証用タイムアウト", "AbortError"))));
+          return { ok: state.mode !== "http", status: state.mode === "http" ? 503 : 200, json: async () => { if (state.mode === "json") throw new SyntaxError("検証用JSONエラー"); return state.rows; } };
+        };
+      }
+      async function open(rows, options = {}, width = 1100) {
+        options = { ...options, generation: ++generation };
+        frame.width = String(width);
+        const doc = new DOMParser().parseFromString(source, "text/html");
+        const base = doc.createElement("base");
+        base.href = new URL("../", location.href).href;
+        doc.head.prepend(base);
+        doc.querySelector('script[src="./js/config.js"]').remove();
+        const setup = doc.createElement("script");
+        const config = { ...window.WANANA_CONFIG, GAS_READ_API_URL: options.unconfigured ? "YOUR_PUBLIC_GAS_READ_API_URL_HERE" : "https://example.invalid/read", USE_DEMO_DATA: false };
+        const safeJson = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
+        setup.textContent = `(${bootstrap.toString()})(${safeJson(config)},${safeJson(rows)},${safeJson(options)},${now});`;
+        doc.head.insertBefore(setup, doc.querySelector("script"));
+        if (options.noChart) doc.querySelector('script[src*="chart.js"]').remove();
+        frame.srcdoc = "<!doctype html>\n" + doc.documentElement.outerHTML;
+        await until(() => {
+          const document = frame.contentDocument;
+          return frame.contentWindow?.__test?.generation === options.generation && document?.getElementById("update-status")?.textContent.match(options.expectFailure ? /未取得/ : /最終更新|未接続/) && document.getElementById("refresh-button").disabled === Boolean(options.unconfigured);
+        });
+        const win = frame.contentWindow;
+        assert(!win.__test.errors.length, win.__test.errors.join("\n"));
+        assert(options.expectFailure ? win.__test.consoleErrors.length === 1 : !win.__test.consoleErrors.length, win.__test.consoleErrors.join("\n"));
+        if (!options.noChart) assert(typeof win.Chart === "function", "実Chart.jsが読み込まれていません");
+        return win;
+      }
+      const openNode = (rows, options = {}, width = 1100) => open(rows, { search: "?node=trap-01", ...options }, width);
+      const chips = (win) => Array.from(win.document.querySelectorAll("#node-chips .node-chip"));
+      const activeNode = (win) => chips(win).find((chip) => chip.getAttribute("aria-pressed") === "true")?.dataset.node;
+      const choose = (win, node) => {
+        const chip = chips(win).find((item) => item.dataset.node === node);
+        assert(chip, "Node chipがありません：" + node);
+        chip.click();
+      };
+      const receiverLog = (overrides = {}) => log({ node: "receiver-01", event: "RECEIVER_HEALTH", sensor: null, battery: null, batteryStatus: null, temperature: null, temperatureStatus: null, loraRssi: null, wifiRssi: -33, messageId: 15, boot: 1, send: 15, ...overrides });
+      const multiLogs = () => [
+        log({ node: "trap-02", sensor: "OPEN", battery: 7.91, batteryStatus: "LOW", temperature: 42, temperatureStatus: "HOT", loraRssi: -102, timestamp: timestamp(now - 60000), event: "TRAP_OPEN", messageId: 22, boot: 2, send: 23 }),
+        log({ node: "trap-03", battery: 8.42, temperature: 18.5, loraRssi: -81, event: "MAGNET", messageId: 33, boot: 3, send: 34 }),
+        log({ node: "trap-01", sensor: "OPEN", timestamp: timestamp(now - 3600000), battery: 8.2 }),
+        log({ node: "trap-01", sensor: "CLOSED", timestamp: timestamp(now - 30000), messageId: 11, boot: 1, send: 12 }),
+        log({ node: "trap-02", sensor: "CLOSED", timestamp: timestamp(now - 7200000), battery: 8.01 })
+      ];
+      const text = (win, id) => win.document.getElementById(id).textContent;
+      const visible = (win, id) => !win.document.getElementById(id).hidden;
+      const chart = (win, id) => win.Chart.getChart(win.document.getElementById(id));
+      const dataset = (win, key, node) => chart(win, key + "-chart")?.data.datasets.find((series) => series.label === node);
+      async function refresh(win) {
+        win.document.getElementById("refresh-button").click();
+        await until(() => !win.document.getElementById("refresh-button").disabled);
+      }
+      async function test(name, callback) {
+        try { await callback(); passed++; results.textContent += `PASS ${name}\n`; }
+        catch (error) { failed++; results.textContent += `FAIL ${name}: ${error.message}\n`; }
+        summary.textContent = `${passed} PASS / ${failed} FAIL`;
+      }
+      document.getElementById("run").addEventListener("click", async () => {
+        const button = document.getElementById("run");
+        button.disabled = true; results.textContent = ""; passed = 0; failed = 0;
+        try {
+          source = await (await fetch("../index.html", { cache: "no-store" })).text();
+          await test("API未設定：案内・デモリンク・外部リクエストなし", async () => {
+            const win = await openNode([], { unconfigured: true });
+            assert(visible(win, "setup-notice") && !visible(win, "demo-notice"), "設定案内の表示が不正");
+            assert(win.__test.calls.length === 0, "未設定でAPIを呼び出しました");
+          });
+          await test("0件：UNKNOWN・空履歴・3つのデータなし表示", async () => {
+            const win = await openNode([]);
+            assert(text(win, "sensor-value") === "UNKNOWN" && text(win, "history-count") === "直近0件", "空状態が不正");
+            assert(visible(win, "chart-grid") && ["battery", "temperature", "lora"].every((key) => visible(win, key + "-empty")), "0件のグラフが不正");
+          });
+          await test("1件・CLOSED・3グラフ・JST・通常console errorなし", async () => {
+            const win = await openNode([log()]);
+            assert(text(win, "sensor-value") === "CLOSED" && !visible(win, "alerts"), "CLOSEDまたは警告が不正");
+            assert(text(win, "last-received") === timestamp(), "JST表示が一致しません");
+            assert(text(win, "battery-value") === "8.136" && text(win, "lora-value") === "-87" && text(win, "wifi-value") === "-29", "数値が不正");
+            assert(["battery", "temperature", "lora"].every((key) => chart(win, `${key}-chart`)?.data.datasets[0].data.length === 1), "3グラフの実体がありません");
+            const requestUrl = new URL(win.__test.calls[0].url);
+            assert(requestUrl.searchParams.get("action") === "logs" && requestUrl.searchParams.get("limit") === "1000" && win.__test.calls[0].credentials === "omit", "リクエストが不正");
+            assert(win.__test.intervals.some((timer) => timer.ms === 60000), "60秒更新が登録されていません");
+          });
+          for (const [name, overrides, expected] of [
+            ["OPEN", { sensor: "OPEN" }, "状態：OPEN"],
+            ["Battery LOW", { batteryStatus: "LOW" }, "電池警告：LOW"],
+            ["Battery CRITICAL", { batteryStatus: "CRITICAL" }, "電池警告：CRITICAL"],
+            ["Temperature HOT", { temperatureStatus: "HOT" }, "温度警告：HOT"],
+            ["Temperature CRITICAL", { temperatureStatus: "CRITICAL" }, "温度警告：CRITICAL"]
+          ]) await test(name, async () => {
+            const win = await openNode([log(overrides)]);
+            assert(visible(win, "alerts") && text(win, "alerts").includes(expected), "警告がありません");
+          });
+          await test("無通信しきい値：2時間29分59秒→2時間30分・取得なしでも警告", async () => {
+            const win = await openNode([log({ timestamp: timestamp(now - 8999000) })]);
+            assert(!visible(win, "alerts"), "しきい値前に警告しました");
+            win.__test.shift = 1000;
+            win.__test.intervals.find((timer) => timer.ms === 1000).callback();
+            assert(text(win, "alerts").includes("150分"), "しきい値ちょうどで警告しませんでした");
+          });
+          await test("OPEN・無通信・電池・温度の4警告を同時表示", async () => {
+            const win = await openNode([log({ sensor: "OPEN", timestamp: timestamp(now - 9000000), batteryStatus: "CRITICAL", temperatureStatus: "CRITICAL" })]);
+            assert(win.document.querySelectorAll("#alerts .alert").length === 4, "4つの警告が揃いません");
+          });
+          await test("LoRa全件null/欠損：データなし・他2グラフは維持", async () => {
+            const missing = log(); delete missing.loraRssi;
+            const win = await openNode([log({ loraRssi: null, timestamp: timestamp(now - 60000) }), missing]);
+            assert(text(win, "lora-value") === "-" && visible(win, "lora-empty") && !chart(win, "lora-chart"), "LoRa空状態が不正");
+            assert(chart(win, "battery-chart") && chart(win, "temperature-chart"), "他グラフが壊れました");
+          });
+          await test("不正数値・欠損・UNKNOWN・欠損値のグラフ間隙", async () => {
+            const win = await openNode([log({ timestamp: timestamp(now - 60000) }), log({ battery: "NaN", temperature: "", loraRssi: "Infinity", wifiRssi: false, batteryStatus: "other", temperatureStatus: "other", sensor: "other", event: "other" })]);
+            assert(["battery-value", "temperature-value", "lora-value", "wifi-value"].every((id) => text(win, id) === "-"), "不正値を数値化しました");
+            assert(text(win, "sensor-value") === "UNKNOWN" && text(win, "battery-status") === "INVALID", "不明状態が不正");
+            assert(chart(win, "lora-chart").data.datasets[0].data[1].y === null && !chart(win, "lora-chart").data.datasets[0].spanGaps, "欠損値をつないでいます");
+          });
+          await test("日時不正・存在しない日付・正しい最新ログの選択", async () => {
+            const win = await openNode([log({ timestamp: "2026-02-30 12:00:00", sensor: "OPEN" }), log({ timestamp: "broken" }), log()]);
+            assert(text(win, "sensor-value") === "CLOSED" && text(win, "data-note").includes("日時不明の2件"), "不正日時の処理が不正");
+            assert(chart(win, "battery-chart").data.datasets[0].data.length === 1, "不正日時がグラフに入りました");
+          });
+          await test("日時が全件不明：判定不能の警告・グラフなし", async () => {
+            const win = await openNode([log({ timestamp: null })]);
+            assert(text(win, "last-received") === "日時不明" && text(win, "alerts").includes("判定できません"), "日時不明の警告なし");
+          });
+          await test("最新1000件・履歴50件・日時順ソート", async () => {
+            const rows = Array.from({ length: 1220 }, (_, i) => log({ timestamp: timestamp(now - i * 60000), node: "trap-01", messageId: i })).reverse();
+            const win = await openNode(rows);
+            assert(text(win, "node-value") === "trap-01" && text(win, "message-value") === "0" && text(win, "history-count") === "直近50件", "最新または履歴上限が不正");
+            assert(chart(win, "battery-chart").data.datasets[0].data.length === 1000 && win.document.querySelectorAll("#history-body tr").length === 50, "件数上限が不正");
+          });
+          await test("HTML injection：node文字列をテキストとして表示", async () => {
+            const payload = '<img src=x onerror="window.INJECTED=true">';
+            const win = await openNode([log({ node: payload, event: payload, sensor: payload })], { search: "?node=" + encodeURIComponent(payload) });
+            assert(text(win, "node-value") === payload && !win.INJECTED && !win.document.querySelector("#history-body img"), "HTMLとして挿入しました");
+          });
+          await test("各イベント色・電池LOW・温度WARM/HOT/CRITICALの色", async () => {
+            const events = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "danger", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", UNKNOWN: "neutral" };
+            const win = await openNode(Object.keys(events).map((event, i) => log({ event, timestamp: timestamp(now - i * 60000) })));
+            for (const element of win.document.querySelectorAll("#history-body td:nth-child(4) .badge")) assert(element.classList.contains(`tone-${events[element.textContent]}`), "イベント色が不正");
+            for (const [batteryStatus, temperatureStatus, tone] of [["LOW", "WARM", "warning"], ["CRITICAL", "HOT", "hot"], ["INVALID", "CRITICAL", "danger"]]) {
+              win.__test.rows = [log({ batteryStatus, temperatureStatus })]; await refresh(win);
+              assert(win.document.getElementById("temperature-status").classList.contains(`tone-${tone}`), "温度色が不正");
+            }
+          });
+          await test("API失敗：network/HTTP/JSON/形式不正・前回データ保持・復旧", async () => {
+            const win = await openNode([log()]);
+            const previous = win.document.getElementById("history-body").textContent;
+            const instance = chart(win, "battery-chart");
+            for (const mode of ["network", "http", "json", "shape"]) {
+              win.__test.mode = mode; win.__test.rows = mode === "shape" ? { error: "bad" } : [log({ sensor: "OPEN" })];
+              await refresh(win);
+              assert(visible(win, "update-error") && text(win, "sensor-value") === "CLOSED" && win.document.getElementById("history-body").textContent === previous, "前回表示を失いました");
+              assert(chart(win, "battery-chart") === instance, "前回グラフを失いました");
+            }
+            assert(win.__test.consoleErrors.length === 4 && win.__test.errors.length === 0, "エラーログまたは例外が不正");
+            win.__test.mode = "ok"; win.__test.rows = [log({ sensor: "OPEN" })]; await refresh(win);
+            assert(!visible(win, "update-error") && text(win, "sensor-value") === "OPEN", "復旧しませんでした");
+          });
+          await test("15秒タイムアウト・重複更新防止", async () => {
+            const win = await openNode([log()], { fastTimeout: true });
+            win.__test.mode = "timeout";
+            const before = win.__test.calls.length;
+            win.__test.intervals.find((timer) => timer.ms === 60000).callback();
+            win.__test.intervals.find((timer) => timer.ms === 60000).callback();
+            assert(win.document.getElementById("refresh-button").getAttribute("aria-busy") === "true" && text(win, "sensor-value") === "CLOSED", "更新中の状態表示が不正");
+            await until(() => visible(win, "update-error"));
+            assert(win.document.getElementById("refresh-button").getAttribute("aria-busy") === "false", "更新状態を解除できません");
+            assert(win.__test.calls.length === before + 1 && text(win, "sensor-value") === "CLOSED", "タイムアウト・重複制御が不正");
+          });
+          await test("更新でLoRaなし→あり→なし・正常な0件へクリア", async () => {
+            const win = await openNode([log({ loraRssi: null })]);
+            win.__test.rows = [log()]; await refresh(win); assert(chart(win, "lora-chart"), "LoRaグラフを作成できません");
+            win.__test.rows = [log({ loraRssi: null })]; await refresh(win); assert(visible(win, "lora-empty") && !chart(win, "lora-chart"), "LoRaグラフを解除できません");
+            win.__test.rows = []; await refresh(win); assert(text(win, "sensor-value") === "UNKNOWN" && text(win, "history-count") === "直近0件", "正常な0件へ更新できません");
+          });
+          await test("Chart.js CDN障害：カード・履歴を継続", async () => {
+            const win = await openNode([log()], { noChart: true });
+            assert(text(win, "sensor-value") === "CLOSED" && text(win, "data-note").includes("グラフを読み込めません"), "CDN障害時に画面が壊れました");
+          });
+
+          await test("Node一覧自動抽出・重複除外・ALLがデフォルト", async () => {
+            const win = await open(multiLogs());
+            const options = chips(win);
+            assert(activeNode(win) === "" && options.map((o) => o.dataset.node).join(",") === ",trap-01,trap-02,trap-03", "Node一覧が不正");
+            assert(visible(win, "all-overview") && visible(win, "single-overview") && text(win, "node-value") === "trap-03", "ALLの最新Node表示が不正");
+          });
+          await test("ALL：最新Nodeの主表示・詳細・グラフと全Node一覧・履歴", async () => {
+            const win = await open(multiLogs());
+            const buttons = win.document.querySelectorAll("#node-list .node-summary");
+            assert(buttons.length === 3 && buttons[0].textContent.includes("CLOSED") && buttons[1].textContent.includes("OPEN"), "Node別最新状態が不正");
+            assert(text(win, "history-count") === "直近5件" && text(win, "history-body").includes("trap-02"), "ALL履歴が不正");
+            assert(visible(win, "detail-section") && text(win, "node-value") === "trap-03" && text(win, "battery-value") === "8.420" && text(win, "temperature-value") === "18.5" && text(win, "lora-value") === "-81", "ALL詳細が最新Nodeではありません");
+            assert(text(win, "latest-event-value") === "MAGNET" && text(win, "message-value") === "33" && text(win, "boot-value") === "3" && text(win, "send-value") === "34", "ALLの最新Event・カウンターが不正");
+            assert(text(win, "last-received") === timestamp() && true, "ALLの受信日時・グラフNode名が不正");
+            assert(visible(win, "chart-grid") && ["battery", "temperature", "lora"].every((key) => chart(win, key + "-chart").data.datasets.length === 3), "ALL比較グラフのNode数が不正");
+            assert(dataset(win, "battery", "trap-03").data.map((point) => point.y).join(",") === "8.42", "Node別seriesの値が不正");
+            assert(text(win, "alerts").includes("trap-02") && !text(win, "alerts").includes("trap-01"), "最新Node単位の警告ではありません");
+          });
+          await test("Node選択：最新・詳細・3グラフ・履歴・URLが同時切替", async () => {
+            const win = await open(multiLogs());
+            const requests = win.__test.calls.length;
+            choose(win, "trap-02");
+            assert(text(win, "node-value") === "trap-02" && text(win, "sensor-value") === "OPEN" && visible(win, "detail-section"), "Node最新表示が不正");
+            assert(text(win, "battery-value") === "7.910" && text(win, "temperature-value") === "42.0" && text(win, "lora-value") === "-102", "詳細の数値が不正");
+            assert(text(win, "event-value") === "TRAP_OPEN" && text(win, "message-value") === "22" && text(win, "boot-value") === "2" && text(win, "send-value") === "23", "詳細のカウンターが不正");
+            for (const key of ["battery", "temperature", "lora"]) assert(chart(win, key + "-chart").data.datasets[0].data.length === 2, "Nodeグラフ件数が不正");
+            assert(chart(win, "battery-chart").data.datasets[0].data.map((point) => point.y).join(",") === "8.01,7.91", "他Nodeの値がグラフに混入しました");
+            assert(text(win, "history-count") === "直近2件" && !text(win, "history-body").includes("trap-01"), "Node履歴が不正");
+            assert(new URL(win.__test.url).searchParams.get("node") === "trap-02" && win.__test.calls.length === requests, "URL更新またはリロードなし切替が不正");
+            choose(win, "trap-01");
+            assert(text(win, "sensor-value") === "CLOSED" && !visible(win, "alerts"), "CLOSEDへの切替が不正");
+            choose(win, "");
+            assert(visible(win, "all-overview") && visible(win, "detail-section") && text(win, "node-value") === "trap-03" && chart(win, "battery-chart").data.datasets.length === 3 && text(win, "history-count") === "直近5件", "ALLへの復帰が不正");
+          });
+          await test("ALL一覧からタップしてNode選択", async () => {
+            const win = await open(multiLogs());
+            win.document.querySelectorAll("#node-list .node-summary")[1].click();
+            assert(text(win, "node-value") === "trap-02" && activeNode(win) === "trap-02", "一覧から切り替わりません");
+          });
+          await test("URL：有効Node・存在しないNode・query保持・戻る操作", async () => {
+            const win = await open(multiLogs(), { search: "?node=trap-01&view=field" });
+            assert(text(win, "node-value") === "trap-01" && visible(win, "single-overview"), "URL Node初期選択が不正");
+            choose(win, "trap-02");
+            assert(new URL(win.__test.url).searchParams.get("view") === "field", "他queryを失いました");
+            win.__test.search = "?node=trap-01";
+            win.dispatchEvent(new win.Event("popstate"));
+            assert(text(win, "node-value") === "trap-01", "popstateに追従しません");
+            const missing = await open(multiLogs(), { search: "?node=missing" });
+            assert(activeNode(missing) === "" && visible(missing, "all-overview"), "不存在NodeがALLになりません");
+          });
+          await test("更新でNode追加・選択維持・消失時ALL・API失敗時保持", async () => {
+            const win = await open(multiLogs(), { search: "?node=trap-02" });
+            win.__test.rows = [...multiLogs(), ...Array.from({ length: 12 }, (_, i) => log({ node: "new-" + i }))];
+            await refresh(win);
+            assert(chips(win).length === 16 && text(win, "node-value") === "trap-02", "台数増加または選択維持が不正");
+            win.__test.mode = "network";
+            await refresh(win);
+            choose(win, "trap-01");
+            assert(visible(win, "update-error") && text(win, "node-value") === "trap-01", "失敗時にキャッシュから切り替えられません");
+            win.__test.mode = "ok"; win.__test.rows = [log({ node: "trap-03" })];
+            await refresh(win);
+            assert(visible(win, "all-overview") && activeNode(win) === "", "消失NodeがALLになりません");
+          });
+          await test("Node名のHTML injection対策：一覧・選択肢・警告・URL", async () => {
+            const payload = '<img src=x onerror="window.INJECTED=true">';
+            const win = await open([log({ node: payload, sensor: "OPEN" }), log()]);
+            assert(text(win, "node-list").includes(payload) && text(win, "alerts").includes(payload) && !win.document.querySelector("#node-list img") && !win.INJECTED, "Node名をHTMLとして扱いました");
+            choose(win, payload);
+            assert(text(win, "node-value") === payload && new URL(win.__test.url).searchParams.get("node") === payload, "特殊文字Nodeを選択できません");
+          });
+          await test("各Nodeの無通信判定・ヘッダーの秒時計・最終更新を分離", async () => {
+            const win = await open([log(), log({ node: "trap-02", timestamp: timestamp(now - 9000000) })]);
+            assert(text(win, "alerts").includes("trap-02") && text(win, "alerts").includes("150分"), "古いNodeの無通信を検出しません");
+            const updated = text(win, "update-status");
+            const clock = text(win, "current-clock");
+            win.__test.shift = 1000; win.__test.intervals.find((timer) => timer.ms === 1000).callback();
+            assert(text(win, "current-clock") !== clock && text(win, "current-clock").endsWith("JST") && text(win, "update-status") === updated, "秒時計と最終更新が混在しています");
+          });
+          await test("デモモード：複数Node・API取得なし・URL指定保持", async () => {
+            const win = await open([], { search: "?demo=1&node=trap-02" });
+            assert(visible(win, "demo-notice") && win.__test.calls.length === 0 && text(win, "node-value") === "trap-02", "デモNode選択が不正");
+            choose(win, "trap-01");
+            assert(new URL(win.__test.url).searchParams.get("demo") === "1", "デモqueryを失いました");
+          });
+          await test("特殊なNode名・ALLという実Node名も選択可能", async () => {
+            const names = ["ALL", "__proto__", "日本語&01"];
+            const win = await open(names.map((node) => log({ node })));
+            for (const name of names) {
+              choose(win, name);
+              assert(text(win, "node-value") === name && visible(win, "single-overview"), "特殊Nodeを選択できません");
+            }
+            choose(win, "");
+            assert(visible(win, "all-overview"), "実NodeのALLと全体表示が混同されています");
+          });
+          await test("Node別欠損RSSIと取得失敗・復旧時の最終更新時刻", async () => {
+            const win = await open([log(), log({ node: "trap-02", loraRssi: null })]);
+            choose(win, "trap-02");
+            assert(text(win, "lora-value") === "-" && visible(win, "lora-empty") && !chart(win, "lora-chart"), "他NodeのRSSIが混入しました");
+            const success = text(win, "update-status");
+            win.__test.shift = 1000; win.__test.mode = "network"; await refresh(win);
+            assert(text(win, "update-status") === success, "取得失敗で最終成功時刻が進みました");
+            win.__test.mode = "ok"; await refresh(win);
+            assert(text(win, "update-status") !== success, "成功時刻が更新されません");
+          });
+
+          for (const automatic of [false, true]) await test(automatic ? "ALL：60秒更新でフォーカス自動切替" : "ALL：手動更新でフォーカス自動切替", async () => {
+            const win = await open(multiLogs());
+            assert(activeNode(win) === "" && text(win, "node-value") === "trap-03", "初期フォーカスが不正");
+            win.__test.shift = 60000;
+            win.__test.rows = [log({ node: "trap-02", timestamp: timestamp(now + 60000), sensor: "OPEN", event: "TRAP_OPEN", battery: 7.7 }), ...multiLogs()];
+            if (automatic) {
+              win.__test.intervals.find((timer) => timer.ms === 60000).callback();
+              await until(() => !win.document.getElementById("refresh-button").disabled);
+            } else await refresh(win);
+            assert(activeNode(win) === "" && new URL(win.__test.url).searchParams.get("node") === null, "ALLを明示Nodeに書き換えました");
+            assert(text(win, "node-value") === "trap-02" && text(win, "sensor-value") === "OPEN" && text(win, "latest-event-value") === "TRAP_OPEN", "新しいフォーカスへ切り替わりません");
+            assert(text(win, "battery-value") === "7.700" && true && dataset(win, "battery", "trap-02").data.length === 3, "詳細・グラフが追従しません");
+            assert(text(win, "history-count") === "直近6件" && text(win, "history-body").includes("trap-01"), "ALLの履歴が絞り込まれました");
+          });
+          await test("明示選択：別Nodeの新着があっても主表示・詳細・グラフを固定", async () => {
+            const win = await open(multiLogs(), { search: "?node=trap-01" });
+            win.__test.shift = 60000;
+            win.__test.rows = [log({ node: "trap-02", timestamp: timestamp(now + 60000), sensor: "OPEN" }), ...multiLogs()];
+            win.__test.intervals.find((timer) => timer.ms === 60000).callback();
+            await until(() => !win.document.getElementById("refresh-button").disabled);
+            assert(activeNode(win) === "trap-01" && text(win, "node-value") === "trap-01" && text(win, "sensor-value") === "CLOSED", "明示Nodeが勝手に変わりました");
+            assert(text(win, "battery-value") === "8.136" && true && chart(win, "battery-chart").data.datasets[0].data.length === 2 && text(win, "history-count") === "直近2件", "明示Nodeの詳細・グラフ・履歴が不正");
+          });
+          await test("ALL：timestamp比較・日時不正・配列順序の反転", async () => {
+            const rows = [
+              log({ node: "trap-03", timestamp: "2026-02-30 10:00:00" }),
+              log({ node: "trap-02", timestamp: timestamp(now - 1000), sensor: "OPEN" }),
+              log({ node: "trap-01", timestamp: timestamp(now - 60000) })
+            ];
+            for (const data of [rows, [...rows].reverse()]) {
+              const win = await open(data);
+              assert(text(win, "node-value") === "trap-02" && text(win, "sensor-value") === "OPEN" && text(win, "last-received") === timestamp(now - 1000), "timestampの比較が配列順に依存しています");
+            }
+          });
+          await test("ALL：同時刻・全件日時不明でも安全で安定したフォーカス", async () => {
+            for (const invalid of [false, true]) {
+              for (const names of [["trap-03", "trap-01", "trap-02"], ["trap-02", "trap-01", "trap-03"]]) {
+                const win = await open(names.map((node) => log({ node, timestamp: invalid ? "bad" : timestamp() })));
+                assert(text(win, "node-value") === "trap-01" && activeNode(win) === "", "同時刻のフォーカスが不安定です");
+                if (invalid) assert(text(win, "last-received") === "日時不明" && text(win, "alerts").includes("判定できません") && !chart(win, "battery-chart"), "全件日時不明で壊れました");
+              }
+            }
+          });
+          await test("ALL：API失敗時はフォーカス・詳細・グラフ・全履歴を保持", async () => {
+            const win = await open(multiLogs());
+            const previous = text(win, "history-body");
+            const instance = chart(win, "battery-chart");
+            win.__test.mode = "network";
+            win.__test.rows = [log({ node: "trap-02", timestamp: timestamp(now + 60000), sensor: "OPEN" })];
+            await refresh(win);
+            assert(visible(win, "update-error") && text(win, "node-value") === "trap-03" && text(win, "battery-value") === "8.420" && chart(win, "battery-chart") === instance && text(win, "history-body") === previous, "失敗でフォーカスの表示を失いました");
+            assert(activeNode(win) === "", "失敗でALLが変更されました");
+          });
+          await test("ALL：RSSI欠損Nodeを0にせず独立seriesで比較", async () => {
+            const rows = multiLogs().map((row) => row.node === "trap-03" ? { ...row, loraRssi: null } : row);
+            const win = await open(rows);
+            assert(text(win, "node-value") === "trap-03" && text(win, "lora-value") === "-" && !visible(win, "lora-empty") && dataset(win, "lora", "trap-03").data.every((point) => point.y === null), "欠損RSSIを0や他Nodeの値にしました");
+            assert(chart(win, "battery-chart") && chart(win, "temperature-chart"), "他グラフを失いました");
+          });
+          await test("receiver：ALL一覧へ自動追加・最新Nodeへフォーカス・null項目はダッシュ表示", async () => {
+            const win = await open([receiverLog({ timestamp: timestamp(now + 1000) }), ...multiLogs()]);
+            // テスト時計を最新受信に合わせる。未来日時の間はUNKNOWNを許容する。
+            win.__test.shift = 1000; win.__test.intervals.find((timer) => timer.ms === 1000).callback();
+            assert(chips(win).some((chip) => chip.dataset.node === "receiver-01"), "receiverが選択肢にありません");
+            assert(activeNode(win) === "" && text(win, "node-value") === "receiver-01" && text(win, "sensor-value") === "ONLINE", "ALLのreceiver状態が不正");
+            assert(text(win, "battery-value") === "—" && text(win, "temperature-value") === "—" && text(win, "lora-value") === "—" && text(win, "battery-status") === "—" && text(win, "temperature-status") === "—", "null項目をエラー扱いしています");
+            assert(text(win, "wifi-value") === "-33" && text(win, "latest-event-value") === "RECEIVER_HEALTH" && text(win, "message-value") === "15", "receiver詳細が不正");
+            assert(["battery", "temperature", "lora"].every((key) => chart(win, key + "-chart").data.datasets.length === 3 && !dataset(win, key, "receiver-01")), "receiverをtrap比較へ含めています");
+            choose(win, "receiver-01");
+            assert(["battery", "temperature", "lora"].every((key) => visible(win, key + "-empty") && !chart(win, key + "-chart")), "receiver単独のnullからグラフを作成しています");
+            const summary = Array.from(win.document.querySelectorAll("#node-list .node-summary")).find((button) => button.dataset.node === "receiver-01");
+            assert(summary.textContent.includes("ONLINE") && !summary.textContent.includes("INVALID"), "receiver一覧の状態が不正です");
+          });
+          for (const [event, tone] of [["RECEIVER_BOOT", "purple"], ["RECEIVER_HEALTH", "cyan"]]) await test("receiver正式イベント：" + event, async () => {
+            const win = await open([receiverLog({ event })], { search: "?node=receiver-01" });
+            assert(text(win, "sensor-value") === "ONLINE" && text(win, "event-value") === event && win.document.getElementById("latest-event-value").classList.contains("tone-" + tone), "receiverイベント・色が不正");
+            assert(!text(win, "history-body").includes("INVALID") && !visible(win, "alerts"), "null項目が警告やINVALIDになりました");
+          });
+          await test("receiver：3時間でtrap用無通信警告を出さない・15時間ちょうどでOFFLINE", async () => {
+            const win = await open([receiverLog({ timestamp: timestamp(now - 3 * 3600000) })]);
+            assert(text(win, "sensor-value") === "ONLINE" && !visible(win, "alerts"), "receiverへtrap閾値を適用しました");
+            win.__test.shift = 12 * 3600000 - 1000;
+            win.__test.intervals.find((timer) => timer.ms === 1000).callback();
+            assert(text(win, "sensor-value") === "ONLINE" && !visible(win, "alerts"), "15時間前に警告しました");
+            win.__test.shift += 1000;
+            win.__test.intervals.find((timer) => timer.ms === 1000).callback();
+            assert(text(win, "sensor-value") === "OFFLINE" && text(win, "alerts").includes("900分") && text(win, "node-list").includes("OFFLINE") && chips(win).find((chip) => chip.dataset.node === "receiver-01").textContent.includes("OFFLINE"), "15時間しきい値で警告しません");
+          });
+          await test("receiver：API失敗時にreceiver詳細保持・未知イベントと日時不明も安全", async () => {
+            const win = await open([receiverLog()]);
+            win.__test.mode = "network"; await refresh(win);
+            assert(visible(win, "update-error") && text(win, "sensor-value") === "ONLINE" && text(win, "wifi-value") === "-33", "失敗でreceiver詳細を失いました");
+            win.__test.mode = "ok"; win.__test.rows = [receiverLog({ event: "LORA_SILENCE", timestamp: "bad" })]; await refresh(win);
+            assert(text(win, "sensor-value") === "UNKNOWN" && text(win, "event-value") === "UNKNOWN" && text(win, "alerts").includes("判定できません"), "未知イベント・不正日時で壊れました");
+          });
+          await test("Node chips：ネイティブbutton・単一active・状態文言・リロードなし", async () => {
+            const win = await open([...multiLogs(), receiverLog({ timestamp: timestamp(now - 1000) })]);
+            const calls = win.__test.calls.length;
+            assert(chips(win).length === 5 && chips(win).every((chip) => chip.tagName === "BUTTON" && chip.type === "button"), "chipsが操作可能なbuttonではありません");
+            assert(chips(win).filter((chip) => chip.getAttribute("aria-pressed") === "true").length === 1 && activeNode(win) === "", "ALL activeが不正");
+            assert(chips(win).find((chip) => chip.dataset.node === "trap-02").textContent.includes("OPEN") && chips(win).find((chip) => chip.dataset.node === "receiver-01").textContent.includes("ONLINE"), "chipの状態文言が不正");
+            for (const node of ["trap-02", "receiver-01", ""]) {
+              choose(win, node);
+              assert(activeNode(win) === node && chips(win).filter((chip) => chip.getAttribute("aria-pressed") === "true").length === 1, "active chipが一意ではありません");
+            }
+            assert(win.__test.calls.length === calls, "chip操作で再取得しました");
+          });
+
+          await test("ALL比較：実timestampの独立series・receiver除外・OPEN後も継続", async () => {
+            const rows = [
+              log({ node: "trap-01", timestamp: timestamp(now - 7200000), battery: 8.2, temperature: 20, loraRssi: -80 }),
+              receiverLog({ timestamp: timestamp(now + 1000) }),
+              log({ node: "trap-02", timestamp: timestamp(now - 5100000), battery: 8.1, temperature: 21, loraRssi: -90 }),
+              log({ node: "trap-01", timestamp: timestamp(now - 3600000), battery: null, temperature: null, loraRssi: null, event: "TRAP_OPEN", sensor: "OPEN" }),
+              log({ node: "trap-02", timestamp: timestamp(now - 1500000), battery: 8.0, temperature: 22, loraRssi: -93 }),
+              log({ node: "trap-01", timestamp: timestamp(now), battery: 7.9, temperature: 23, loraRssi: -95, event: "HEALTH_TIMER", sensor: "OPEN" })
+            ];
+            const win = await open(rows);
+            for (const key of ["battery", "temperature", "lora"]) {
+              const instance = chart(win, key + "-chart");
+              assert(instance.data.datasets.length === 2 && instance.options.plugins.legend.display && !dataset(win, key, "receiver-01"), "比較dataset・legend・receiver除外が不正");
+              const a = dataset(win, key, "trap-01"), b = dataset(win, key, "trap-02");
+              assert(a.data.length === 3 && b.data.length === 2 && a.data[1].y === null && !a.spanGaps, "nullを0にしたかOPEN後のHEALTH_TIMERを失いました");
+              assert(a.data[0].x === now - 7200000 && a.data[2].x === now && b.data[0].x === now - 5100000 && b.data[1].x === now - 1500000, "Node間timestampを補間しました");
+              assert(instance.options.scales.x.type === "linear", "実時刻の数値軸ではありません");
+              const context = { dataset: b, parsed: b.data[0] };
+              assert(instance.options.plugins.tooltip.callbacks.title([context]).includes(timestamp(now - 5100000)) && instance.options.plugins.tooltip.callbacks.label(context).includes("trap-02"), "tooltipにNode・時刻がありません");
+            }
+            assert(activeNode(win) === "" && text(win, "node-value") === "receiver-01" && text(win, "history-count") === "直近6件", "比較がfocusNode・ALL履歴へ影響しました");
+            choose(win, "trap-02");
+            assert(["battery", "temperature", "lora"].every((key) => chart(win, key + "-chart").data.datasets.length === 1 && !chart(win, key + "-chart").options.plugins.legend.display), "Node指定のdataset数・legendが不正");
+          });
+          await test("ALL比較：3Node以上とNode色の更新・並べ替え・再表示での安定性", async () => {
+            const rows = multiLogs();
+            const win = await open(rows);
+            const colors = new Map(chart(win, "battery-chart").data.datasets.map((series) => [series.label, series.borderColor]));
+            assert(colors.size === 3, "3Node datasetがありません");
+            for (const key of ["temperature", "lora"]) for (const [node, color] of colors) assert(dataset(win, key, node).borderColor === color, "3グラフでNode色が違います");
+            win.__test.rows = [log({ node: "trap-99" }), ...rows.reverse()]; await refresh(win);
+            for (const [node, color] of colors) assert(dataset(win, "battery", node).borderColor === color, "Node増加・並べ替えで色が変わりました");
+            const again = await open(rows);
+            for (const [node, color] of colors) assert(dataset(again, "battery", node).borderColor === color, "ページ再表示で色が変わりました");
+          });
+
+          await test("receiver GET例：空sensor・send=4・Wi-Fi=-35・LoRa=nullを正しく表示", async () => {
+            const row = receiverLog({ timestamp: "2026-11-07 00:00:00", sensor: "", batteryStatus: "", temperatureStatus: "", messageId: 4, boot: 1, send: 4, wifiRssi: -35, loraRssi: null });
+            const win = await open([row], { search: "?node=receiver-01" });
+            assert(text(win, "sensor-value") === "ONLINE" && text(win, "latest-event-value") === "RECEIVER_HEALTH", "有効なreceiverログをUNKNOWNにしました");
+            assert(text(win, "wifi-value") === "-35" && text(win, "lora-value") === "—" && text(win, "send-value") === "4" && text(win, "message-value") === "4", "RSSIとcounterのmappingが不正");
+            assert(text(win, "battery-value") === "—" && text(win, "temperature-value") === "—" && !visible(win, "chart-section"), "receiverのnull表示・推移非表示が不正");
+          });
+          await test("receiver：ISO日時と未来の有効なBOOTもONLINE・時計ずれは別警告", async () => {
+            const win = await open([receiverLog({ event: "RECEIVER_BOOT", timestamp: "2026-11-06T15:00:00.000Z" })], { search: "?node=receiver-01" });
+            assert(text(win, "last-received") === "2026-11-07 00:00:00" && text(win, "sensor-value") === "ONLINE", "ISO日時を不正扱いしています");
+            win.__test.rows = [receiverLog({ event: "RECEIVER_BOOT", timestamp: timestamp(now + 60000) })]; await refresh(win);
+            assert(text(win, "sensor-value") === "ONLINE" && text(win, "alerts").includes("未来"), "未来のBOOTでUNKNOWNになるか時計ずれ警告がありません");
+          });
+          await test("receiver→trap→ALL：推移sectionの表示切替と比較維持", async () => {
+            const win = await open([receiverLog(), ...multiLogs()], { search: "?node=receiver-01" });
+            assert(!visible(win, "chart-section"), "receiverで空グラフ領域を表示しています");
+            choose(win, "trap-02");
+            assert(visible(win, "chart-section") && chart(win, "battery-chart").data.datasets.length === 1, "trapの推移が表示されません");
+            choose(win, "");
+            assert(visible(win, "chart-section") && chart(win, "battery-chart").data.datasets.length === 3, "ALL比較が消えました");
+          });
+          await test("画面文言：最新の状態・Log・不要な見出し除去", async () => {
+            const win = await open(multiLogs());
+            assert(text(win, "current-heading") === "最新の状態" && text(win, "node-list-heading") === "Log", "見出しが更新されていません");
+            assert(!win.document.getElementById("detail-heading") && !win.document.getElementById("chart-node"), "不要な見出しが残っています");
+          });
+
+          const sessionLogs = () => [
+            log({ sessionId: "4000000000", timestamp: timestamp(now - 5 * 3600000), battery: 6.8, boot: 1, messageId: 50 }),
+            log({ node: "trap-02", sessionId: "B-old", timestamp: timestamp(now - 4 * 3600000), battery: 6.9 }),
+            log({ sessionId: "100", timestamp: timestamp(now - 2 * 3600000), event: "BOOT", battery: 8.4, boot: 70, messageId: 1 }),
+            log({ node: "trap-02", sessionId: "B-current", timestamp: timestamp(now - 90 * 60000), battery: 8.1 }),
+            receiverLog({ sessionId: "R-old", timestamp: timestamp(now - 3 * 3600000), event: "RECEIVER_BOOT" }),
+            log({ sessionId: "100", timestamp: timestamp(now - 3600000), battery: 8.3, boot: 71, messageId: 2 }),
+            log({ node: "trap-02", sessionId: "B-current", timestamp: timestamp(now - 30 * 60000), battery: 8, event: "TRAP_OPEN", sensor: "OPEN" }),
+            log({ sessionId: "100", timestamp: timestamp(now - 60000), battery: 8.2, boot: 72, messageId: 1 }),
+            receiverLog({ sessionId: "R-new", timestamp: timestamp(), event: "RECEIVER_HEALTH" })
+          ];
+          await test("Session：14フィールドを保持・ID大小ではなく最新timestampを採用", async () => {
+            const win = await open(sessionLogs(), { search: "?node=trap-01" });
+            assert(text(win, "session-value") === "100" && text(win, "battery-value") === "8.200", "数値的に大きい旧sessionを選びました");
+            for (const key of ["battery", "temperature", "lora"]) {
+              const points = dataset(win, key, "trap-01").data;
+              assert(points.length === 3 && points[0].x === now - 2 * 3600000 && points.at(-1).x === now - 60000, "旧sessionが入り、境界を接続しています");
+            }
+            assert(dataset(win, "battery", "trap-01").data.map((point) => point.y).join(",") === "8.4,8.3,8.2", "boot変化・messageIdリセットで同sessionを切りました");
+            assert(text(win, "history-body").includes("4000000000") && text(win, "history-body").includes("100") && text(win, "history-count") === "直近4件", "履歴から旧sessionを消しました");
+          });
+          await test("Session：ALLは各Node自身の最新session・focusはreceiverのまま", async () => {
+            const win = await open(sessionLogs());
+            for (const key of ["battery", "temperature", "lora"]) {
+              assert(dataset(win, key, "trap-01").data.length === 3 && dataset(win, key, "trap-02").data.length === 2 && !dataset(win, key, "receiver-01"), "Nodeごとの最新sessionで比較していません");
+            }
+            assert(text(win, "session-value") === "R-new" && text(win, "node-value") === "receiver-01" && text(win, "sensor-value") === "ONLINE" && text(win, "history-count") === "直近9件", "session追加でfocus・receiver・全履歴を壊しました");
+          });
+          await test("Session：更新で新sessionへ置換し、messageId=1の旧点を残さない", async () => {
+            const win = await open(sessionLogs(), { search: "?node=trap-01" });
+            win.__test.rows = [log({ sessionId: "5", timestamp: timestamp(), battery: 8.5, boot: 1, messageId: 1 }), ...sessionLogs()];
+            await refresh(win);
+            assert(text(win, "session-value") === "5" && dataset(win, "battery", "trap-01").data.length === 1 && dataset(win, "battery", "trap-01").data[0].y === 8.5, "新旧sessionを連続描画しました");
+            assert(text(win, "history-count") === "直近5件" && text(win, "history-body").includes("4000000000"), "履歴から旧sessionを消しました");
+          });
+          await test("Session：数値IDはstringへ変換・文字IDと一致・先頭ゼロは保持", async () => {
+            const win = await open([
+              log({ sessionId: 100, timestamp: timestamp(now - 2000) }),
+              log({ sessionId: "00100", timestamp: timestamp(now - 1000) }),
+              log({ sessionId: "100", timestamp: timestamp() })
+            ]);
+            assert(text(win, "session-value") === "100" && dataset(win, "battery", "trap-01").data.length === 2, "IDをstringとして区別・正規化していません");
+          });
+          await test("Session：欠損・不正IDを現在sessionへ混ぜず、最新欠損時も旧sessionへ戻さない", async () => {
+            const missing = log({ timestamp: timestamp(now - 1000) }); delete missing.sessionId;
+            const win = await open([log({ sessionId: "100" }), missing, log({ sessionId: null, timestamp: timestamp(now - 2000) })]);
+            assert(dataset(win, "battery", "trap-01").data.length === 1, "session欠損を現在sessionへ混ぜました");
+            win.__test.shift = 1000; win.__test.rows = [{ ...missing, timestamp: timestamp(now + 1000) }, log({ sessionId: "100" })]; await refresh(win);
+            assert(text(win, "session-value") === "—" && !chart(win, "battery-chart") && text(win, "history-count") === "直近2件", "最新session不明時に旧sessionを代用しました");
+          });
+          await test("Session：receiver再起動session更新でもONLINE・推移非表示", async () => {
+            const win = await open([receiverLog({ sessionId: "old", timestamp: timestamp(now - 3600000) }), receiverLog({ sessionId: "new", event: "RECEIVER_BOOT" })], { search: "?node=receiver-01" });
+            assert(text(win, "session-value") === "new" && text(win, "sensor-value") === "ONLINE" && !visible(win, "chart-section") && text(win, "history-body").includes("old"), "receiver session更新を壊しました");
+          });
+          await test("Session：取得済み現sessionを4件等に制限せず全点描画", async () => {
+            const win = await open(Array.from({ length: 300 }, (_, i) => log({ sessionId: "current", timestamp: timestamp(now - i * 60000) })));
+            assert(dataset(win, "battery", "trap-01").data.length === 300 && text(win, "history-count") === "直近50件", "グラフへ全データを渡していません");
+          });
+          await test("Session：デモの複数Node・session切替・OPEN継続", async () => {
+            const win = await open([], { search: "?demo=1&node=trap-01" });
+            assert(text(win, "session-value") === "100" && dataset(win, "battery", "trap-01").data.length === 24 && text(win, "history-body").includes("4000000000"), "trap-01のsession切替デモが不正");
+            choose(win, "trap-02");
+            assert(text(win, "sensor-value") === "OPEN" && text(win, "latest-event-value") === "HEALTH_TIMER" && dataset(win, "battery", "trap-02").data.length === 48, "trap-02のOPEN継続が不正");
+            choose(win, "receiver-01");
+            assert(text(win, "session-value") === "700" && text(win, "sensor-value") === "ONLINE" && text(win, "history-body").includes("900"), "receiver sessionデモが不正");
+          });
+          await test("Session：ID文字列をHTMLとして解釈しない", async () => {
+            const payload = '<img src=x onerror="window.INJECTED=true">';
+            const win = await open([log({ sessionId: payload })]);
+            assert(text(win, "session-value") === payload && text(win, "history-body").includes(payload) && !win.INJECTED && !win.document.querySelector("#history-body img"), "SessionをHTMLとして挿入しました");
+          });
+          await test("スマートフォン320/375/390px：全体横はみ出しなし・表スクロール", async () => {
+            for (const width of [320, 375, 390]) {
+              const win = await openNode([log()], {}, width);
+              await pause(100);
+              assert(win.document.documentElement.scrollWidth <= win.innerWidth, `${width}pxでページがはみ出します`);
+              const table = win.document.querySelector(".table-scroll");
+              assert(table.scrollWidth > table.clientWidth && win.getComputedStyle(table).overflowX === "auto", "履歴を横スクロールできません");
+              assert(["battery", "temperature", "lora"].every((key) => win.document.getElementById(`${key}-chart`).getBoundingClientRect().width > 0), "モバイルでグラフがありません");
+            }
+          });
+          await test("Desktop 1440px / Mobile 390px：ALLとNode表示の配置", async () => {
+            for (const width of [1440, 390]) {
+              const win = await open(multiLogs(), {}, width);
+              await pause(100);
+              assert(win.document.documentElement.scrollWidth <= win.innerWidth, "ALLが画面からはみ出します");
+              choose(win, "trap-02"); await pause(100);
+              assert(win.document.documentElement.scrollWidth <= win.innerWidth, "Node表示が画面からはみ出します");
+              const clock = win.document.getElementById("current-clock").getBoundingClientRect();
+              const selector = win.document.getElementById("node-chips").getBoundingClientRect();
+              const latest = win.document.getElementById("single-overview").getBoundingClientRect();
+              const detail = win.document.getElementById("detail-section").getBoundingClientRect();
+              assert(clock.top < selector.top && selector.top < latest.top && latest.top <= detail.top && detail.bottom <= latest.bottom, "情報階層の配置が不正");
+              const heights = ["battery", "temperature", "lora"].map((key) => win.document.getElementById(key + "-chart").getBoundingClientRect().height);
+              assert(Math.max(...heights) - Math.min(...heights) < 2, "グラフの高さが揃っていません");
+            }
+          });
+          await test("Mobile 390/430px：Node chips横スクロール・キーボードfocus", async () => {
+            for (const width of [390, 430]) {
+              const win = await open(Array.from({ length: 16 }, (_, i) => log({ node: "trap-" + String(i + 1).padStart(2, "0") })), {}, width);
+              await pause(100);
+              const group = win.document.getElementById("node-chips");
+              assert(win.getComputedStyle(group).overflowX === "auto" && group.scrollWidth > group.clientWidth && win.document.documentElement.scrollWidth <= win.innerWidth, "chips以外へ横はみ出ししています");
+              const last = chips(win).at(-1);
+              last.focus();
+              assert(win.document.activeElement === last, "chipへキーボードfocusを移せません");
+              last.click();
+              assert(activeNode(win) === last.dataset.node, "最後のchipを選択できません");
+            }
+          });
+          await test("実HTTP：14フィールドJSON・302追従・1000件URL→Node/receiver/sessionグラフ", async () => {
+            const win = await open([], { httpFixture: true, fixtureBase: new URL("./", location.href).href });
+            assert(win.__test.http.status === 200 && win.__test.http.redirected && win.__test.http.contentType.includes("application/json"), "HTTP/redirect/JSON応答が不正");
+            const request = new URL(win.__test.calls[0].url);
+            assert(request.searchParams.get("action") === "logs" && request.searchParams.get("limit") === "1000", "logs取得queryが欠損");
+            assert(chips(win).length === 4 && text(win, "node-value") === "receiver-01" && text(win, "sensor-value") === "ONLINE" && text(win, "wifi-value") === "-35", "実HTTP JSONが画面へ届きません");
+            assert(text(win, "history-count") === "直近4件" && text(win, "history-body").includes("4000000000") && dataset(win, "battery", "trap-01").data.length === 1, "履歴/session分離が不正");
+            choose(win, "trap-01");
+            assert(text(win, "sensor-value") === "CLOSED" && text(win, "session-value") === "100", "trap最新状態が不正");
+          });
+          await test("実HTTP：503はHTTP分類・エラー表示・デモへfallbackしない", async () => {
+            const win = await open([], { httpFixture: true, fixtureBase: new URL("./", location.href).href, fixturePath: "./api-fail", expectFailure: true });
+            assert(visible(win, "update-error") && !visible(win, "demo-notice") && win.__test.consoleErrors[0].includes("[http]"), "HTTP失敗の分類/表示が不正");
+          });
+        } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }
+        finally { summary.textContent = `完了：${passed} PASS / ${failed} FAIL`; button.disabled = false; }
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# Local-only configuration and credentials must never be published.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+credentials*.json
+secrets*
+
+# Local inspection / editor output
+.local/
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+Thumbs.db
+.DS_Store

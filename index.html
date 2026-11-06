@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d1015">
+  <title>Wanana</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./css/style.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+  <script defer src="./js/config.js"></script>
+  <script defer src="./js/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">メインコンテンツへ移動</a>
+  <div class="shell">
+    <header class="site-header">
+      <div class="brand"><h1>わなな</h1></div>
+      <div class="header-tools">
+        <div class="header-actions"><time id="current-clock">--:--:-- JST</time><button id="refresh-button" type="button">更新</button></div>
+        <p id="update-status" class="update-status" role="status">未取得</p>
+      </div>
+    </header>
+    <main id="main">
+      <div class="node-toolbar">
+        <div id="node-chips" class="node-chips" role="group" aria-label="Node選択"><button class="node-chip" type="button" data-node="" aria-pressed="true">ALL</button></div>
+      </div>
+      <aside id="demo-notice" class="notice demo-notice" hidden><strong>デモ表示中</strong><span>サンプルデータです。</span><a href="./">通常表示へ</a></aside>
+      <aside id="setup-notice" class="notice" hidden><strong>データの接続準備中</strong><a href="?demo=1">デモを見る</a></aside>
+      <div id="update-error" class="notice error-notice" role="alert" hidden></div>
+      <section id="alerts" class="alerts" aria-label="重要警告" aria-live="polite" hidden></section>
+
+      <section class="latest-section" aria-labelledby="current-heading">
+        <div class="section-heading"><h2 id="current-heading">最新の状態</h2></div>
+        <div id="single-overview" class="single-overview">
+          <article id="sensor-card" class="sensor-card tone-neutral">
+            <h3 id="node-value" class="node-name">-</h3>
+            <div id="sensor-value" class="sensor-value">UNKNOWN</div>
+            <div class="received-summary"><span>最終受信</span><time id="last-received">-</time><span class="timezone">JST</span><p id="received-age">受信データなし</p></div>
+            <p class="latest-event"><span>Event</span><span id="latest-event-value" class="badge tone-neutral">UNKNOWN</span></p>
+          </article>
+          <div id="detail-section" class="integrated-detail">
+        <dl class="detail-metrics">
+          <div class="metric-cell primary-metric"><dt>Battery</dt><dd><span class="metric"><span id="battery-value">-</span> <small>V</small></span><span id="battery-status" class="badge tone-neutral">INVALID</span></dd></div>
+          <div class="metric-cell primary-metric"><dt>LoRa RSSI</dt><dd class="lora-metric"><span class="metric"><span id="lora-value">-</span> <small>dBm</small></span></dd></div>
+          <div class="metric-cell"><dt>温度</dt><dd><span class="metric"><span id="temperature-value">-</span> <small>℃</small></span><span id="temperature-status" class="badge tone-neutral">INVALID</span></dd></div>
+          <div class="metric-cell"><dt>受信機 Wi-Fi RSSI</dt><dd><span class="metric"><span id="wifi-value">-</span> <small>dBm</small></span></dd></div>
+        </dl>
+        <dl class="detail-meta">
+          <div><dt>Event</dt><dd><span id="event-value" class="badge tone-neutral">UNKNOWN</span></dd></div>
+          <div><dt>Message ID</dt><dd id="message-value">-</dd></div>
+          <div><dt>Boot</dt><dd id="boot-value">-</dd></div>
+          <div><dt>Send</dt><dd id="send-value">-</dd></div>
+          <div class="session-meta"><dt>Session</dt><dd id="session-value">—</dd></div>
+        </dl>
+          </div>
+        </div>
+      </section>
+
+      <section id="chart-section" aria-labelledby="chart-heading">
+        <div class="section-heading"><h2 id="chart-heading">推移</h2></div>
+        <div id="chart-grid" class="chart-grid">
+          <article class="chart-panel"><div class="chart-heading"><h3>Battery Voltage</h3><span>V</span></div><div class="chart-area"><canvas id="battery-chart" role="img" aria-label="電池電圧の推移。数値はイベント履歴でも確認できます。"></canvas><p id="battery-empty" class="chart-empty">Batteryデータなし</p></div></article>
+          <article class="chart-panel"><div class="chart-heading"><h3>Temperature</h3><span>℃</span></div><div class="chart-area"><canvas id="temperature-chart" role="img" aria-label="温度の推移。数値はイベント履歴でも確認できます。"></canvas><p id="temperature-empty" class="chart-empty">Temperatureデータなし</p></div></article>
+          <article class="chart-panel"><div class="chart-heading"><h3>LoRa RSSI</h3><span>dBm</span></div><div class="chart-area"><canvas id="lora-chart" role="img" aria-label="LoRa受信強度の推移。数値はイベント履歴でも確認できます。"></canvas><p id="lora-empty" class="chart-empty">LoRa RSSIデータなし</p></div></article>
+        </div>
+        <p id="data-note" class="data-note" role="status"></p>
+      </section>
+
+      <section id="all-overview" aria-labelledby="node-list-heading">
+        <div class="section-heading"><h2 id="node-list-heading">Log</h2></div>
+        <div class="overview">
+          <div class="node-list-head" aria-hidden="true"><span>Node</span><span>状態</span><span>Battery</span><span>LoRa RSSI</span><span>最終受信</span></div>
+          <div id="node-list" class="node-list"></div>
+          <p id="overview-empty" class="empty-row">受信ログはありません</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="history-heading">
+        <div class="section-heading"><h2 id="history-heading">イベント履歴</h2><p id="history-count">直近0件</p></div>
+        <div class="history-panel">
+          <div class="table-scroll" tabindex="0" role="region" aria-label="受信履歴">
+            <table><caption class="visually-hidden">直近50件の受信ログ。日時はJST。</caption><thead><tr><th scope="col">受信時刻 <small>JST</small></th><th scope="col">Node</th><th scope="col">Session</th><th scope="col">イベント</th><th scope="col">状態</th><th scope="col">Battery</th><th scope="col">温度</th><th scope="col">LoRa RSSI</th></tr></thead><tbody id="history-body"><tr><td colspan="8" class="empty-row">受信ログはありません</td></tr></tbody></table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <noscript><p class="notice">JavaScriptを有効にしてください。</p></noscript>
+</body>
+</html>
