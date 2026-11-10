@@ -537,9 +537,9 @@
             choose(win, "");
             assert(visible(win, "chart-section") && chart(win, "battery-chart").data.datasets.length === 3, "ALL比較が消えました");
           });
-          await test("画面文言：最新の状態・Log・不要な見出し除去", async () => {
+          await test("画面文言：最新の状態・Node一覧・不要な見出し除去", async () => {
             const win = await open(multiLogs());
-            assert(text(win, "current-heading") === "最新の状態" && text(win, "node-list-heading") === "Log", "見出しが更新されていません");
+            assert(text(win, "current-heading") === "最新の状態" && text(win, "node-list-heading") === "Node一覧", "見出しが更新されていません");
             assert(!win.document.getElementById("detail-heading") && !win.document.getElementById("chart-node"), "不要な見出しが残っています");
           });
 
