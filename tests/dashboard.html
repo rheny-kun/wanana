@@ -102,7 +102,7 @@
         const setup = doc.createElement("script");
         const config = { ...window.WANANA_CONFIG, GAS_READ_API_URL: options.unconfigured ? "YOUR_PUBLIC_GAS_READ_API_URL_HERE" : options.apiUrl ?? "https://example.invalid/read", USE_DEMO_DATA: false };
         const safeJson = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
-        setup.textContent = `(${bootstrap.toString()})(${safeJson(config)},${safeJson(rows)},${safeJson(options)},${now});`;
+        setup.textContent = `(${bootstrap.toString()})(${safeJson(config)},${safeJson(rows)},${safeJson(options)},${options.fixedNow ?? now});`;
         doc.head.insertBefore(setup, doc.querySelector("script"));
         if (options.noChart) doc.querySelector('script[src*="chart.js"]').remove();
         frame.srcdoc = "<!doctype html>\n" + doc.documentElement.outerHTML;
@@ -785,8 +785,9 @@
               if (count) rows.push({ ...rows[0] });
               const win = await open(rows);
               const prediction = text(win, "prediction-value");
-              assert(count < 2 ? prediction.includes("2件以上") : prediction.includes(timestamp(now-(count===2 ? 180000 : 60000))) && prediction.includes(`検知${count}件`), "予測の件数またはmedianが不正");
-              if(count===2) assert(prediction.includes("参考値"), "2件で精度を誇張しました");
+              const expected = timestamp(now-(count===2 ? 180000 : 60000)).slice(11,16);
+              assert(count < 2 ? !visible(win,"prediction") && prediction === "" : visible(win,"prediction") && prediction.includes(expected) && prediction.includes("約1分おき"), "予測の件数またはmedianが不正");
+              if(count===2) assert(prediction.includes("参考"), "2件で精度を誇張しました");
             }
           });
           await test("Session：過去選択で表示・グラフ・履歴・予測を分離し現在へ戻る", async () => {
@@ -818,9 +819,34 @@
           });
           await test("配置：Sessionは既存見出し内・予測は状態カード内・操作の重複なし", async () => {
             const win = await open([log()], {search:"?node=trap-01"});
-            assert(win.document.querySelector(".latest-section .section-heading #session-controls") && win.document.querySelector("#sensor-card #prediction"), "既存コンテンツへ統合されていません");
+            assert(win.document.querySelector(".latest-section .section-heading #session-controls") && win.document.querySelector(".received-summary .received-line + #prediction"), "既存コンテンツへ統合されていません");
             assert(win.document.querySelectorAll("#session-select").length===1 && win.document.querySelectorAll(".session-controls button").length===0, "重複操作が残っています");
             assert(win.document.querySelector("#main").children[1].id === "demo-notice", "メイン上部に操作領域が残っています");
+          });
+          await test("予測表示：分・時間・日・当日/翌日・過去Session非表示", async () => {
+            const base = Date.parse("2026-11-24T03:00:00Z");
+            for(const [interval,expected] of [[30,"30分"],[180,"3時間"],[90,"1時間30分"],[1440,"1日"],[1560,"1日2時間"]]) {
+              const times = [base-interval*60000,base];
+              const rows = times.map(time=>log({timestamp:timestamp(time),event:"TRAP_OPEN"}));
+              rows.push(log({event:"HEALTH_TIMER",timestamp:timestamp(base+60000)}));
+              const win=await open(rows,{fixedNow:base});
+              const textValue=text(win,"prediction-value");
+              const next=timestamp(base+interval*60000);
+              assert(textValue.includes(`約${expected}おきに受信中・次回予定`) && textValue.includes(interval<1440 ? next.slice(11,16) : next.slice(5,10).replace("-","/")+" "+next.slice(11,16)), "間隔/日時表示が不正");
+              assert(!/秒|ミリ秒/.test(textValue) && textValue.includes("参考"), "細かすぎる表示です");
+              win.__test.rows=[...rows,log({sessionId:"new",timestamp:timestamp(base+120000)})]; await refresh(win);
+              choose(win,"trap-01");
+              const select=win.document.getElementById("session-select"); select.value="test-session";select.dispatchEvent(new win.Event("change"));
+              assert(text(win,"current-heading")==="PAST SESSION" && !visible(win,"prediction"), "過去Sessionで予定を表示しています");
+            }
+          });
+          await test("予測行：Desktop/Mobileで最終受信の直下・2行以内", async () => {
+            for(const width of [1440,390,430]) {
+              const win=await open([log({event:"TRAP_OPEN",timestamp:timestamp(now-180*60000)}),log({event:"TRAP_OPEN",timestamp:timestamp(now-90*60000)}),log()],{search:"?node=trap-01"},width);
+              const row=win.document.getElementById("prediction"), received=win.document.querySelector(".received-line");
+              assert(visible(win,"prediction") && row.previousElementSibling===received && row.getBoundingClientRect().top>=received.getBoundingClientRect().bottom, "最終受信の直下ではありません");
+              assert(row.getBoundingClientRect().height<=parseFloat(win.getComputedStyle(row).lineHeight)*2+1 && win.document.documentElement.scrollWidth<=win.innerWidth, "予測行が長すぎます");
+            }
           });
         } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }
         finally { summary.textContent = `完了：${passed} PASS / ${failed} FAIL`; button.disabled = false; }

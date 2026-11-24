@@ -159,10 +159,22 @@
     return { count: times.length, next: times.at(-1) + median };
   }
 
+  function formatPredictionInterval(interval) {
+    const minutes = Math.max(1, Math.round(interval / 60000));
+    const days = Math.floor(minutes / 1440);
+    const hours = Math.floor(minutes % 1440 / 60);
+    const rest = minutes % 60;
+    return `${days ? `${days}日` : ""}${hours ? `${hours}時間` : ""}${rest ? `${rest}分` : ""}`;
+  }
+
   function predictionText(node, session) {
     const prediction = predictNextDetection(node, session);
-    if (prediction.next === null) return `予測には2件以上の検知が必要（${prediction.count}件）`;
-    return `${formatJst(prediction.next)} JST 頃 · 検知${prediction.count}件${prediction.count === 2 ? " · 参考値" : ""}${prediction.next < Date.now() ? " · 予測時刻経過" : ""}`;
+    if (isReceiverNode(node) || prediction.next === null) return "";
+    const last = getDetectionEvents(node, session).at(-1);
+    const date = formatJst(prediction.next);
+    const scheduled = date.slice(0, 10) === formatJst(Date.now()).slice(0, 10)
+      ? date.slice(11, 16) : `${date.slice(5, 10).replace("-", "/")} ${date.slice(11, 16)}`;
+    return `約${formatPredictionInterval(prediction.next - last)}おきに受信中・次回予定 ${scheduled}頃${prediction.count === 2 ? "（参考）" : ""}`;
   }
 
   function displayLog() {
@@ -188,8 +200,9 @@
     selector.value = selectedSession ?? "";
     byId("session-notice").textContent = sessionNotice;
     const log = displayLog();
-    byId("prediction").hidden = !log || isReceiver(log);
-    byId("prediction-value").textContent = log ? predictionText(log.node, log.sessionId) : "";
+    const prediction = log && selectedSession === null ? predictionText(log.node, log.sessionId) : "";
+    byId("prediction").hidden = !prediction;
+    byId("prediction-value").textContent = prediction;
   }
 
   function nodeState(log) {
@@ -299,12 +312,6 @@
       const name = document.createElement("span");
       name.className = "summary-node";
       name.textContent = node;
-      if (!isReceiverNode(node)) {
-        const prediction = document.createElement("small");
-        prediction.className = "summary-prediction";
-        prediction.textContent = `次回検知予測: ${predictionText(node, log.sessionId)}`;
-        name.append(prediction);
-      }
       const battery = document.createElement("span");
       battery.className = "summary-battery";
       const batteryState = log.battery === null ? "INVALID" : log.batteryStatus;

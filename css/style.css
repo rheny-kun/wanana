@@ -64,8 +64,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .sensor-card.tone-danger { background: var(--danger-bg); border-left-width: 6px; }
 .node-name { font-size: 1.15rem; font-weight: 600; overflow-wrap: anywhere; }
 .sensor-value { color: var(--tone); font-size: clamp(2.75rem, 5.3vw, 4rem); font-weight: 700; line-height: 1.15; letter-spacing: .02em; margin: 4px 0 9px; }
-.received-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
-.received-summary > span { color: var(--text-secondary); font-size: .75rem; }
+.received-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.received-line > span { color: var(--text-secondary); font-size: .75rem; }
 #last-received { font-variant-numeric: tabular-nums; font-size: 1rem; font-weight: 550; }
 #received-age { color: var(--text-muted); font-size: .72rem; }
 .latest-event { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 7px; }
@@ -151,7 +151,7 @@ td:nth-child(4) .badge.tone-blue { color: var(--text-muted); font-weight: 400; }
   .sensor-card { padding: 13px 16px; }
   .node-name { font-size: 1.05rem; }
   .sensor-value { font-size: 3rem; margin-bottom: 8px; }
-  .received-summary { gap: 3px 7px; }
+  .received-line { gap: 3px 7px; }
   #last-received { font-size: .9rem; }
   #received-age { flex-basis: 100%; }
   .metric-cell { padding: 11px 13px; }
@@ -258,6 +258,4 @@ td { padding-top: 6px; padding-bottom: 6px; }
 .session-controls select { min-height: 44px; min-width: 0; max-width: 100%; width: 210px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; font-size: .75rem; }
 .session-notice { display: block; color: var(--text-muted); font-size: .7rem; overflow-wrap: anywhere; }
 .session-notice:empty { display: none; }
-.prediction { grid-column: 2; grid-row: 4; display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 6px; color: var(--text-secondary); font-size: .7rem; overflow-wrap: anywhere; }
-.prediction > span:first-child { color: var(--text-muted); }
-.summary-prediction { display: block; color: var(--text-muted); font-weight: 400; font-size: .65rem; white-space: normal; }
+.prediction { margin-top: 5px; color: var(--text-secondary); font-size: .7rem; overflow-wrap: anywhere; }
