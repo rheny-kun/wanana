@@ -777,11 +777,11 @@
             win.__test.rows = [receiverLog()]; await refresh(win);
             assert(text(win, "node-value") === "-" && text(win, "sensor-value") === "UNKNOWN" && text(win, "history-count") === "直近1件", "empty stateでデータを失いました");
           });
-          await test("予測：0/1/2件・median・重複・別Session・非検知イベント除外", async () => {
+          await test("定期受信：0/1/2件・median・重複・別Session除外", async () => {
             for (const count of [0,1,2,5]) {
               const offsets = [200000,190000,180000,170000,70000].slice(0,count);
-              const rows = offsets.map(ms => log({ timestamp: timestamp(now-ms), event: "TRAP_OPEN" }));
-              rows.push(log(), log({ event: "MAGNET", timestamp: timestamp(now-60000) }), log({ event: "BOOT", timestamp: timestamp(now-50000) }), log({ event: "TRAP_OPEN", sessionId: "old", timestamp: timestamp(now-300000) }));
+              const rows = offsets.map(ms => log({ timestamp: timestamp(now-ms), event: "HEALTH_TIMER" }));
+              rows.push(log({event:"TRAP_OPEN"}), log({ event: "MAGNET", timestamp: timestamp(now-60000) }), log({ event: "BOOT", timestamp: timestamp(now-50000) }), log({ event: "HEALTH_TIMER", sessionId: "old", timestamp: timestamp(now-300000) }));
               if (count) rows.push({ ...rows[0] });
               const win = await open(rows);
               const prediction = text(win, "prediction-value");
@@ -827,8 +827,8 @@
             const base = Date.parse("2026-11-24T03:00:00Z");
             for(const [interval,expected] of [[30,"30分"],[180,"3時間"],[90,"1時間30分"],[1440,"1日"],[1560,"1日2時間"]]) {
               const times = [base-interval*60000,base];
-              const rows = times.map(time=>log({timestamp:timestamp(time),event:"TRAP_OPEN"}));
-              rows.push(log({event:"HEALTH_TIMER",timestamp:timestamp(base+60000)}));
+              const rows = times.map(time=>log({timestamp:timestamp(time),event:"HEALTH_TIMER"}));
+              rows.push(log({event:"TRAP_OPEN",timestamp:timestamp(base+60000)}));
               const win=await open(rows,{fixedNow:base});
               const textValue=text(win,"prediction-value");
               const next=timestamp(base+interval*60000);
@@ -842,10 +842,25 @@
           });
           await test("予測行：Desktop/Mobileで最終受信の直下・2行以内", async () => {
             for(const width of [1440,390,430]) {
-              const win=await open([log({event:"TRAP_OPEN",timestamp:timestamp(now-180*60000)}),log({event:"TRAP_OPEN",timestamp:timestamp(now-90*60000)}),log()],{search:"?node=trap-01"},width);
+              const win=await open([log({event:"HEALTH_TIMER",timestamp:timestamp(now-180*60000)}),log({event:"HEALTH_TIMER",timestamp:timestamp(now-90*60000)}),log({event:"BOOT"})],{search:"?node=trap-01"},width);
               const row=win.document.getElementById("prediction"), received=win.document.querySelector(".received-line");
               assert(visible(win,"prediction") && row.previousElementSibling===received && row.getBoundingClientRect().top>=received.getBoundingClientRect().bottom, "最終受信の直下ではありません");
               assert(row.getBoundingClientRect().height<=parseFloat(win.getComputedStyle(row).lineHeight)*2+1 && win.document.documentElement.scrollWidth<=win.innerWidth, "予測行が長すぎます");
+            }
+          });
+          await test("HEALTH周期：12/15/18時のみで3時間・非HEALTH eventは周期/起点から除外", async () => {
+            const day = "2026-11-24 ";
+            const at = hour => day + String(hour).padStart(2,"0") + ":00:00";
+            const clock = Date.parse("2026-11-24T11:00:00Z");
+            for(const event of ["TRAP_OPEN","TRAP_CLOSED","BOOT","MAGNET","SENSOR_FAULT","OTHER"]) {
+              const rows = [12,15,18].map(hour=>log({event:"HEALTH_TIMER",timestamp:at(hour)}));
+              rows.push(log({event,timestamp:at(13)}),log({event,timestamp:at(19)}));
+              rows.push(log({event:"HEALTH_TIMER",timestamp:at(18)}),log({event:"HEALTH_TIMER",timestamp:at(21)}));
+              rows.push(log({event:"HEALTH_TIMER",sessionId:"other",timestamp:at(17)}),log({event:"HEALTH_TIMER",node:"trap-02",timestamp:at(16)}));
+              const win=await open(rows,{search:"?node=trap-01",fixedNow:clock});
+              assert(text(win,"prediction-value")==="約3時間おきに受信中・次回予定 21:00頃", "非HEALTH/別Node/別Session/重複/未来時刻を周期か起点に混ぜました："+event);
+              const receiver=await open(rows.map(row=>({...row,node:"receiver-01"})),{search:"?node=receiver-01",fixedNow:clock});
+              assert(!visible(receiver,"prediction"), "receiverに予定を表示しました");
             }
           });
         } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }

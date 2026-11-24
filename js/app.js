@@ -145,13 +145,13 @@
     return [...sessions.values()].sort((a, b) => (b.end ?? -Infinity) - (a.end ?? -Infinity) || a.id.localeCompare(b.id));
   }
 
-  // TRAP_OPEN is the explicit detection event; BOOT, MAGNET and HEALTH_TIMER are excluded.
-  function getDetectionEvents(node, session) {
-    return [...new Set(logs.filter((log) => log.node === node && session !== null && log.sessionId === session && log.event === "TRAP_OPEN" && log.timestamp !== null && log.timestamp <= Date.now()).map((log) => log.timestamp))].sort((a, b) => a - b);
+  // Estimate the interval and schedule from HEALTH_TIMER timestamps only.
+  function getHealthEvents(node, session) {
+    return [...new Set(logs.filter((log) => log.node === node && session !== null && log.sessionId === session && log.event === "HEALTH_TIMER" && log.timestamp !== null && log.timestamp <= Date.now()).map((log) => log.timestamp))].sort((a, b) => a - b);
   }
 
-  function predictNextDetection(node, session) {
-    const times = getDetectionEvents(node, session);
+  function predictNextHealth(node, session) {
+    const times = getHealthEvents(node, session);
     if (times.length < 2) return { count: times.length, next: null };
     const intervals = times.slice(1).map((time, i) => time - times[i]).sort((a, b) => a - b);
     const middle = Math.floor(intervals.length / 2);
@@ -168,9 +168,9 @@
   }
 
   function predictionText(node, session) {
-    const prediction = predictNextDetection(node, session);
+    const prediction = predictNextHealth(node, session);
     if (isReceiverNode(node) || prediction.next === null) return "";
-    const last = getDetectionEvents(node, session).at(-1);
+    const last = getHealthEvents(node, session).at(-1);
     const date = formatJst(prediction.next);
     const scheduled = date.slice(0, 10) === formatJst(Date.now()).slice(0, 10)
       ? date.slice(11, 16) : `${date.slice(5, 10).replace("-", "/")} ${date.slice(11, 16)}`;
