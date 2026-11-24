@@ -182,8 +182,6 @@ button:active:not(:disabled) { transform: translateY(1px); }
 #refresh-button[aria-busy="true"] { opacity: .55; border-style: dashed; }
 .table-scroll { max-height: 520px; overflow: auto; scrollbar-color: var(--border) var(--surface); }
 th { position: sticky; top: 0; z-index: 1; }
-.important-row td { background-color: rgba(255, 120, 120, .035); }
-.important-row td:first-child { border-left: 2px solid var(--danger); }
 @supports (backdrop-filter: blur(8px)) {
   .single-overview, .detail-metrics, .detail-meta, .chart-panel, .overview, .history-panel { background-color: rgba(22, 26, 33, .90); backdrop-filter: blur(8px); }
 }
@@ -253,9 +251,17 @@ td { padding-top: 6px; padding-bottom: 6px; }
 .session-meta { grid-column: 1 / -1; }
 .detail-meta .session-meta dd { font-size: .72rem; color: var(--text-secondary); overflow-wrap: anywhere; }
 
- .session-controls { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 70%; }
+.session-controls { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; margin-top: 18px; flex-wrap: wrap; }
 .session-controls label { color: var(--text-muted); font-size: .7rem; }
 .session-controls select { min-height: 44px; min-width: 0; max-width: 100%; width: 210px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; font-size: .75rem; }
 .session-notice { display: block; color: var(--text-muted); font-size: .7rem; overflow-wrap: anywhere; }
 .session-notice:empty { display: none; }
 .prediction { margin-top: 5px; color: var(--text-secondary); font-size: .7rem; overflow-wrap: anywhere; }
+
+.range-mode, .graph-range-form { font-size: .75rem; color: var(--text-secondary); }
+.range-mode select, .graph-range-form input { min-height: 44px; max-width: 100%; min-width: 0; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 5px; padding: 5px 8px; font: inherit; }
+.graph-range-form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.graph-range-form label { display: flex; flex-direction: column; gap: 3px; max-width: 100%; }
+.graph-range-form button { font-size: .75rem; }
+.range-message { color: var(--text-secondary); font-size: .7rem; overflow-wrap: anywhere; }
+.range-message:not(:empty) { margin: 6px 0; }

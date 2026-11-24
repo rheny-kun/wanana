@@ -171,7 +171,6 @@
             assert(win.__test.intervals.some((timer) => timer.ms === 60000), "60秒更新が登録されていません");
           });
           for (const [name, overrides, expected] of [
-            ["OPEN", { sensor: "OPEN" }, "状態：OPEN"],
             ["Battery LOW", { batteryStatus: "LOW" }, "電池警告：LOW"],
             ["Battery CRITICAL", { batteryStatus: "CRITICAL" }, "電池警告：CRITICAL"],
             ["Temperature HOT", { temperatureStatus: "HOT" }, "温度警告：HOT"],
@@ -187,9 +186,9 @@
             win.__test.intervals.find((timer) => timer.ms === 1000).callback();
             assert(!visible(win, "alerts"), "時間経過だけで警告しました");
           });
-          await test("OPEN・電池・温度の3警告を同時表示", async () => {
+          await test("電池・温度の2警告を同時表示", async () => {
             const win = await openNode([log({ sensor: "OPEN", timestamp: timestamp(now - 9000000), batteryStatus: "CRITICAL", temperatureStatus: "CRITICAL" })]);
-            assert(win.document.querySelectorAll("#alerts .alert").length === 3, "3つの警告が揃いません");
+            assert(win.document.querySelectorAll("#alerts .alert").length === 2, "2つの警告が揃いません");
           });
           await test("LoRa全件null/欠損：データなし・他2グラフは維持", async () => {
             const missing = log(); delete missing.loraRssi;
@@ -224,7 +223,7 @@
             assert(text(win, "node-value") === payload && !win.INJECTED && !win.document.querySelector("#history-body img"), "HTMLとして挿入しました");
           });
           await test("各イベント色・電池LOW・温度WARM/HOT/CRITICALの色", async () => {
-            const events = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "danger", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", UNKNOWN: "neutral" };
+            const events = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "cyan", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", UNKNOWN: "neutral" };
             const win = await openNode(Object.keys(events).map((event, i) => log({ event, timestamp: timestamp(now - i * 60000) })));
             for (const element of win.document.querySelectorAll("#history-body td:nth-child(4) .badge")) assert(element.classList.contains(`tone-${events[element.textContent]}`), "イベント色が不正");
             for (const [batteryStatus, temperatureStatus, tone] of [["LOW", "WARM", "warning"], ["CRITICAL", "HOT", "hot"], ["INVALID", "CRITICAL", "danger"]]) {
@@ -333,7 +332,7 @@
           });
           await test("Node名のHTML injection対策：一覧・選択肢・警告・URL", async () => {
             const payload = '<img src=x onerror="window.INJECTED=true">';
-            const win = await open([log({ node: payload, sensor: "OPEN" }), log()]);
+            const win = await open([log({ node: payload, sensor: "FAULT", event:"SENSOR_FAULT" }), log()]);
             assert(text(win, "node-list").includes(payload) && text(win, "alerts").includes(payload) && !win.document.querySelector("#node-list img") && !win.INJECTED, "Node名をHTMLとして扱いました");
             choose(win, payload);
             assert(text(win, "node-value") === payload && new URL(win.__test.url).searchParams.get("node") === payload, "特殊文字Nodeを選択できません");
@@ -785,7 +784,7 @@
               if (count) rows.push({ ...rows[0] });
               const win = await open(rows);
               const prediction = text(win, "prediction-value");
-              const expected = timestamp(now-(count===2 ? 180000 : 60000)).slice(11,16);
+              const expected = timestamp(now+10000).slice(11,16);
               assert(count < 2 ? !visible(win,"prediction") && prediction === "" : visible(win,"prediction") && prediction.includes(expected) && prediction.includes("約1分おき"), "予測の件数またはmedianが不正");
               if(count===2) assert(prediction.includes("参考"), "2件で精度を誇張しました");
             }
@@ -817,9 +816,9 @@
             win.__test.rows=[log({sessionId:"new"})]; await refresh(win);
             assert(text(win,"session-value")==="new" && text(win,"session-notice").includes("取得範囲") && text(win,"current-heading")==="最新の状態", "取得範囲外を説明していません");
           });
-          await test("配置：Sessionは既存見出し内・予測は状態カード内・操作の重複なし", async () => {
+          await test("配置：SessionはMain末尾・予測は状態カード内・操作の重複なし", async () => {
             const win = await open([log()], {search:"?node=trap-01"});
-            assert(win.document.querySelector(".latest-section .section-heading #session-controls") && win.document.querySelector(".received-summary .received-line + #prediction"), "既存コンテンツへ統合されていません");
+            assert(win.document.querySelector("main > #session-controls:last-child") && win.document.querySelector(".received-summary .received-line + #prediction"), "既存コンテンツへ統合されていません");
             assert(win.document.querySelectorAll("#session-select").length===1 && win.document.querySelectorAll(".session-controls button").length===0, "重複操作が残っています");
             assert(win.document.querySelector("#main").children[1].id === "demo-notice", "メイン上部に操作領域が残っています");
           });
@@ -829,9 +828,9 @@
               const times = [base-interval*60000,base];
               const rows = times.map(time=>log({timestamp:timestamp(time),event:"HEALTH_TIMER"}));
               rows.push(log({event:"TRAP_OPEN",timestamp:timestamp(base+60000)}));
-              const win=await open(rows,{fixedNow:base});
+              const win=await open(rows,{fixedNow:base+120000});
               const textValue=text(win,"prediction-value");
-              const next=timestamp(base+interval*60000);
+              const next=timestamp(base+60000+interval*60000);
               assert(textValue.includes(`約${expected}おきに受信中・次回予定`) && textValue.includes(interval<1440 ? next.slice(11,16) : next.slice(5,10).replace("-","/")+" "+next.slice(11,16)), "間隔/日時表示が不正");
               assert(!/秒|ミリ秒/.test(textValue) && textValue.includes("参考"), "細かすぎる表示です");
               win.__test.rows=[...rows,log({sessionId:"new",timestamp:timestamp(base+120000)})]; await refresh(win);
@@ -848,7 +847,7 @@
               assert(row.getBoundingClientRect().height<=parseFloat(win.getComputedStyle(row).lineHeight)*2+1 && win.document.documentElement.scrollWidth<=win.innerWidth, "予測行が長すぎます");
             }
           });
-          await test("HEALTH周期：12/15/18時のみで3時間・非HEALTH eventは周期/起点から除外", async () => {
+          await test("HEALTH周期：周期と最新sender起点を分離", async () => {
             const day = "2026-11-24 ";
             const at = hour => day + String(hour).padStart(2,"0") + ":00:00";
             const clock = Date.parse("2026-11-24T11:00:00Z");
@@ -858,9 +857,60 @@
               rows.push(log({event:"HEALTH_TIMER",timestamp:at(18)}),log({event:"HEALTH_TIMER",timestamp:at(21)}));
               rows.push(log({event:"HEALTH_TIMER",sessionId:"other",timestamp:at(17)}),log({event:"HEALTH_TIMER",node:"trap-02",timestamp:at(16)}));
               const win=await open(rows,{search:"?node=trap-01",fixedNow:clock});
-              assert(text(win,"prediction-value")==="約3時間おきに受信中・次回予定 21:00頃", "非HEALTH/別Node/別Session/重複/未来時刻を周期か起点に混ぜました："+event);
+              const scheduled=["BOOT","OTHER"].includes(event)?"21:00":"22:00";
+              assert(text(win,"prediction-value")===`約3時間おきに受信中・次回予定 ${scheduled}頃`, "周期またはsender起点が不正："+event);
               const receiver=await open(rows.map(row=>({...row,node:"receiver-01"})),{search:"?node=receiver-01",fixedNow:clock});
               assert(!visible(receiver,"prediction"), "receiverに予定を表示しました");
+            }
+          });
+          await test("OPENは正常状態：警告なし・FAULTは警告・Main末尾Session", async () => {
+            const win=await open([log({sensor:"OPEN",event:"TRAP_OPEN"})]);
+            assert(text(win,"sensor-value")==="OPEN" && !visible(win,"alerts") && !win.document.getElementById("sensor-card").classList.contains("tone-danger"), "OPENを警告扱いしました");
+            assert(win.document.querySelector(".site-header").nextElementSibling.id==="main" && win.document.querySelector("#main").lastElementChild.id==="session-controls", "Header/Main構造が不正");
+            win.__test.rows=[log({sensor:"FAULT",event:"SENSOR_FAULT"})]; await refresh(win);
+            assert(visible(win,"alerts") && text(win,"alerts").includes("SENSOR_FAULT"), "FAULT警告を失いました");
+          });
+          await test("予定起点：HEALTH12/15時＋sender16:20→19:20、受信だけなら18:00", async () => {
+            const time=hour=>"2026-11-24 "+hour+":00";
+            for(const event of [null,"TRAP_OPEN","TRAP_CLOSED","MAGNET","SENSOR_FAULT","BOOT","RECEIVER_HEALTH"]) {
+              const rows=[log({timestamp:time("12:00")}),log({timestamp:time("15:00")})];
+              if(event) rows.push(log({event,timestamp:time("16:20")}));
+              const win=await open(rows,{fixedNow:Date.parse("2026-11-24T08:00:00Z")});
+              const expected=event && !["BOOT","RECEIVER_HEALTH"].includes(event)?"19:20":"18:00";
+              assert(text(win,"prediction-value").includes(`約3時間おきに受信中・次回予定 ${expected}頃`), "起点eventが不正："+event);
+            }
+          });
+          const applyRange=(win,start,end)=>{
+            const doc=win.document,mode=doc.getElementById("graph-range-mode"); mode.value="custom";mode.dispatchEvent(new win.Event("change"));
+            doc.getElementById("graph-range-start").value=start;doc.getElementById("graph-range-end").value=end;
+            doc.getElementById("graph-range-form").dispatchEvent(new win.Event("submit",{cancelable:true}));
+          };
+          await test("Graph範囲：境界込み・全Graph共通・履歴/状態/予測は非変更・不正範囲・空・reset", async () => {
+            const rows=Array.from({length:20},(_,i)=>log({timestamp:timestamp(now-i*60000)}));
+            const win=await open(rows,{search:"?node=trap-01"});
+            const current=text(win,"last-received"),history=text(win,"history-body"),prediction=text(win,"prediction-value");
+            const input=ms=>timestamp(ms).replace(" ","T");
+            assert(win.document.getElementById("graph-range-mode").value==="all" && dataset(win,"battery","trap-01").data.length===20,"初期全期間が不正");
+            applyRange(win,input(now-5*60000),input(now-3*60000));
+            for(const key of ["battery","temperature","lora"]) assert(dataset(win,key,"trap-01").data.length===3 && dataset(win,key,"trap-01").data[0].x===now-5*60000 && dataset(win,key,"trap-01").data.at(-1).x===now-3*60000,"境界込みの範囲が不正");
+            assert(text(win,"last-received")===current && text(win,"history-body")===history && text(win,"prediction-value")===prediction,"Graph以外へ影響しました");
+            const mode=win.document.getElementById("graph-range-mode"); mode.value="all";mode.dispatchEvent(new win.Event("change"));
+            assert(dataset(win,"battery","trap-01").data.length===20 && !visible(win,"graph-range-form"), "全期間に戻れません");
+            applyRange(win,input(now-4*60000),input(now-4*60000)); assert(dataset(win,"battery","trap-01").data.length===1,"同一開始終了時刻が不正");
+            applyRange(win,input(now-5*60000),input(now-3*60000));
+
+            applyRange(win,input(now),input(now-60000)); assert(text(win,"graph-range-message").includes("正しい順序") && dataset(win,"battery","trap-01").data.length===3,"不正範囲で前回表示を失いました");
+            applyRange(win,"",""); assert(text(win,"graph-range-message").includes("正しい順序"),"未入力を受理しました");
+            applyRange(win,input(now+60000),input(now+120000)); assert(!chart(win,"battery-chart") && text(win,"battery-empty")==="該当データなし","範囲0件が不正");
+            choose(win,"trap-01"); assert(win.document.getElementById("graph-range-mode").value==="all" && dataset(win,"battery","trap-01").data.length===20,"Node変更でresetされません");
+            const sessionWin=await open(sessionLogs(),{search:"?node=trap-01"}); applyRange(sessionWin,input(now-60000),input(now));
+            pickSession(sessionWin,"4000000000"); assert(sessionWin.document.getElementById("graph-range-mode").value==="all" && dataset(sessionWin,"battery","trap-01").data.length===1,"Session変更でresetされません");
+          });
+          await test("Graph範囲：Desktop/Mobileのフォーム配置と操作", async () => {
+            for(const width of [1440,390,430]) {
+              const win=await open([log(),log({timestamp:timestamp(now-60000)})],{},width);
+              applyRange(win,timestamp(now-60000).replace(" ","T"),timestamp(now).replace(" ","T"));
+              assert(win.document.querySelector("#chart-section #graph-range-form") && win.document.documentElement.scrollWidth<=win.innerWidth && dataset(win,"battery","trap-01").data.length===2,"Graph操作配置または横幅が不正");
             }
           });
         } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }

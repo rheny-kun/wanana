@@ -32,9 +32,7 @@
 
       <section class="latest-section" aria-labelledby="current-heading">
         <div class="section-heading"><h2 id="current-heading">最新の状態</h2>
-          <div id="session-controls" class="session-controls" hidden><label for="session-select">Session</label><select id="session-select" aria-label="Session選択"></select></div>
         </div>
-        <small id="session-notice" class="session-notice" role="status"></small>
         <div id="single-overview" class="single-overview">
           <article id="sensor-card" class="sensor-card tone-neutral">
             <h3 id="node-value" class="node-name">-</h3>
@@ -61,7 +59,13 @@
       </section>
 
       <section id="chart-section" aria-labelledby="chart-heading">
-        <div class="section-heading"><h2 id="chart-heading">推移</h2></div>
+        <div class="section-heading"><h2 id="chart-heading">推移</h2><label class="range-mode">表示範囲 <select id="graph-range-mode"><option value="all">全期間</option><option value="custom">範囲指定</option></select></label></div>
+        <form id="graph-range-form" class="graph-range-form" hidden novalidate>
+          <label>開始（JST）<input id="graph-range-start" type="datetime-local" step="1"></label>
+          <label>終了（JST）<input id="graph-range-end" type="datetime-local" step="1"></label>
+          <button type="submit">適用</button>
+        </form>
+        <p id="graph-range-message" class="range-message" role="status"></p>
         <div id="chart-grid" class="chart-grid">
           <article class="chart-panel"><div class="chart-heading"><h3>Battery Voltage</h3><span>V</span></div><div class="chart-area"><canvas id="battery-chart" role="img" aria-label="電池電圧の推移。数値はイベント履歴でも確認できます。"></canvas><p id="battery-empty" class="chart-empty">Batteryデータなし</p></div></article>
           <article class="chart-panel"><div class="chart-heading"><h3>Temperature</h3><span>℃</span></div><div class="chart-area"><canvas id="temperature-chart" role="img" aria-label="温度の推移。数値はイベント履歴でも確認できます。"></canvas><p id="temperature-empty" class="chart-empty">Temperatureデータなし</p></div></article>
@@ -87,6 +91,7 @@
           </div>
         </div>
       </section>
+      <div id="session-controls" class="session-controls" hidden><label for="session-select">Session</label><select id="session-select" aria-label="Session選択"></select><small id="session-notice" class="session-notice" role="status"></small></div>
     </main>
   </div>
   <noscript><p class="notice">JavaScriptを有効にしてください。</p></noscript>

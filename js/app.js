@@ -6,10 +6,10 @@
   const demo = config.USE_DEMO_DATA || parameters.get("demo") === "1";
   const requestedNode = parameters.get("node");
   const byId = (id) => document.getElementById(id);
-  const sensorTones = { OPEN: "danger", CLOSED: "ok", ONLINE: "cyan", OFFLINE: "danger", FAULT: "danger", UNKNOWN: "neutral" };
+  const sensorTones = { OPEN: "cyan", CLOSED: "ok", ONLINE: "cyan", OFFLINE: "danger", FAULT: "danger", UNKNOWN: "neutral" };
   const batteryTones = { NORMAL: "ok", LOW: "warning", CRITICAL: "danger", INVALID: "neutral" };
   const temperatureTones = { NORMAL: "ok", WARM: "warning", HOT: "hot", CRITICAL: "danger", INVALID: "neutral" };
-  const eventTones = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "danger", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", RECEIVER_BOOT: "purple", RECEIVER_HEALTH: "cyan", SENSOR_FAULT: "danger", UNKNOWN: "neutral" };
+  const eventTones = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "cyan", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", RECEIVER_BOOT: "purple", RECEIVER_HEALTH: "cyan", SENSOR_FAULT: "danger", UNKNOWN: "neutral" };
   const logFields = ["timestamp", "node", "sessionId", "event", "sensor", "battery", "batteryStatus", "temperature", "temperatureStatus", "messageId", "boot", "send", "wifiRssi", "loraRssi"];
   const chartDefinitions = [
     { key: "battery", label: "Battery Voltage", unit: "V", empty: "Batteryデータなし" },
@@ -17,6 +17,8 @@
     { key: "lora", field: "loraRssi", label: "LoRa RSSI", unit: "dBm", empty: "LoRa RSSIデータなし" }
   ];
   const charts = new Map();
+  let graphRange = null;
+  let graphContext = null;
   let logs = [];
   let busy = false;
   let lastSuccess = null;
@@ -145,9 +147,14 @@
     return [...sessions.values()].sort((a, b) => (b.end ?? -Infinity) - (a.end ?? -Infinity) || a.id.localeCompare(b.id));
   }
 
-  // Estimate the interval and schedule from HEALTH_TIMER timestamps only.
+  // HEALTH_TIMER defines the interval; supported sender events define the anchor.
   function getHealthEvents(node, session) {
     return [...new Set(logs.filter((log) => log.node === node && session !== null && log.sessionId === session && log.event === "HEALTH_TIMER" && log.timestamp !== null && log.timestamp <= Date.now()).map((log) => log.timestamp))].sort((a, b) => a - b);
+  }
+
+  function getLatestSenderEvent(node, session) {
+    const events = new Set(["HEALTH_TIMER", "MAGNET", "TRAP_OPEN", "TRAP_CLOSED", "SENSOR_FAULT"]);
+    return logs.find(log => !isReceiverNode(node) && log.node === node && session !== null && log.sessionId === session && events.has(log.event) && log.timestamp !== null && log.timestamp <= Date.now());
   }
 
   function predictNextHealth(node, session) {
@@ -156,7 +163,8 @@
     const intervals = times.slice(1).map((time, i) => time - times[i]).sort((a, b) => a - b);
     const middle = Math.floor(intervals.length / 2);
     const median = intervals.length % 2 ? intervals[middle] : (intervals[middle - 1] + intervals[middle]) / 2;
-    return { count: times.length, next: times.at(-1) + median };
+    const anchor = getLatestSenderEvent(node, session)?.timestamp ?? times.at(-1);
+    return { count: times.length, interval: median, next: anchor + median };
   }
 
   function formatPredictionInterval(interval) {
@@ -170,11 +178,10 @@
   function predictionText(node, session) {
     const prediction = predictNextHealth(node, session);
     if (isReceiverNode(node) || prediction.next === null) return "";
-    const last = getHealthEvents(node, session).at(-1);
     const date = formatJst(prediction.next);
     const scheduled = date.slice(0, 10) === formatJst(Date.now()).slice(0, 10)
       ? date.slice(11, 16) : `${date.slice(5, 10).replace("-", "/")} ${date.slice(11, 16)}`;
-    return `約${formatPredictionInterval(prediction.next - last)}おきに受信中・次回予定 ${scheduled}頃${prediction.count === 2 ? "（参考）" : ""}`;
+    return `約${formatPredictionInterval(prediction.interval)}おきに受信中・次回予定 ${scheduled}頃${prediction.count === 2 ? "（参考）" : ""}`;
   }
 
   function displayLog() {
@@ -273,6 +280,7 @@
   }
 
   function selectNode(node) {
+    resetGraphRange();
     selectedSession = null;
     sessionHistoryFiltered = false;
     sessionNotice = "";
@@ -405,7 +413,6 @@
     }
     for (const latest of targets) {
       if (latest.event === "SENSOR_FAULT" || latest.sensor === "FAULT") add(latest, "SENSOR_FAULT", true);
-      if (nodeState(latest) === "OPEN") add(latest, "状態：OPEN。", true);
       if (latest.timestamp === null) {
         add(latest, "受信日時が不明です。日時を判定できません。");
       } else {
@@ -446,7 +453,6 @@
     const filtered = visibleLogs();
     for (const log of filtered.slice(0, 50)) {
       const row = document.createElement("tr");
-      if (log.event === "TRAP_OPEN") row.className = "important-row";
       const batteryStatus = log.battery === null ? "INVALID" : log.batteryStatus;
       const temperatureStatus = log.temperature === null ? "INVALID" : log.temperatureStatus;
       const cells = [
@@ -489,12 +495,28 @@
     return latestByNode.get(node)?.sessionId ?? null;
   }
 
+  function resetGraphRange() {
+    graphRange = null;
+    byId("graph-range-start").value = "";
+    byId("graph-range-end").value = "";
+    byId("graph-range-mode").value = "all";
+    byId("graph-range-form").hidden = true;
+    byId("graph-range-message").textContent = "";
+  }
+
+  function parseRangeTimestamp(value) {
+    return parseTimestamp(value.replace("T", " ") + (value.length === 16 ? ":00" : ""));
+  }
+
   function renderCharts() {
     const all = selectedNode === null;
     const nodes = (all ? [...latestByNode.keys()] : [selectedNode])
       .filter((node) => !isReceiverNode(node))
       .sort(compareNodes);
     const sessions = new Map(nodes.map((node) => [node, selectedNode !== null && selectedSession !== null ? selectedSession : latestSessionId(node)]));
+    const context = JSON.stringify([selectedNode, [...sessions]]);
+    if (graphContext !== null && graphContext !== context) resetGraphRange();
+    graphContext = context;
     const series = new Map(nodes.map((node) => [node, []]));
     let invalidDates = 0;
     // Group once in chronological order for all three charts.
@@ -502,7 +524,7 @@
       const log = logs[index];
       if (!series.has(log.node) || log.sessionId === null || log.sessionId !== sessions.get(log.node)) continue;
       if (log.timestamp === null) invalidDates++;
-      else series.get(log.node).push(log);
+      else if (graphRange === null || (graphRange.start <= log.timestamp && log.timestamp <= graphRange.end)) series.get(log.node).push(log);
     }
     byId("chart-section").hidden = selectedNode !== null && isReceiver(latestByNode.get(selectedNode));
     byId("chart-grid").classList.toggle("comparison", all);
@@ -529,7 +551,7 @@
       const hasData = datasets.some((dataset) => dataset.data.some((point) => point.y !== null));
       canvas.hidden = !hasData || !available;
       empty.hidden = hasData && available;
-      empty.textContent = hasData && !available ? "グラフを読み込めません" : definition.empty;
+      empty.textContent = hasData && !available ? "グラフを読み込めません" : graphRange ? "該当データなし" : definition.empty;
       if (!hasData || !available) {
         charts.get(definition.key)?.destroy();
         charts.delete(definition.key);
@@ -539,6 +561,8 @@
       if (existing) {
         existing.data.datasets = datasets;
         existing.options.plugins.legend.display = all;
+        existing.options.scales.x.min = graphRange?.start;
+        existing.options.scales.x.max = graphRange?.end;
         existing.update("none");
         continue;
       }
@@ -559,7 +583,7 @@
             }
           },
           scales: {
-            x: { type: "linear", grid: { display: false }, border: { display: false }, ticks: { color: "#a1a8b3", maxTicksLimit: 4, maxRotation: 0, font: { size: 10 }, callback: (value) => formatJst(Number(value)).slice(11, 16) } },
+            x: { type: "linear", min: graphRange?.start, max: graphRange?.end, grid: { display: false }, border: { display: false }, ticks: { color: "#a1a8b3", maxTicksLimit: 4, maxRotation: 0, font: { size: 10 }, callback: (value) => formatJst(Number(value)).slice(11, 16) } },
             y: { title: { display: true, text: definition.unit, color: "#a1a8b3" }, border: { display: false }, grid: { color: "#262c35" }, ticks: { color: "#a1a8b3", maxTicksLimit: 5, font: { size: 10 } } }
           }
         }
@@ -668,10 +692,28 @@
   if (config.USE_DEMO_DATA) byId("demo-notice").querySelector("a").hidden = true;
   byId("setup-notice").hidden = demo || configured;
   byId("session-select").addEventListener("change", () => {
+    resetGraphRange();
     selectedSession = byId("session-select").value || null;
     sessionHistoryFiltered = true;
     sessionNotice = "";
     renderView();
+  });
+  byId("graph-range-mode").addEventListener("change", () => {
+    const custom = byId("graph-range-mode").value === "custom";
+    byId("graph-range-form").hidden = !custom;
+    if (!custom) { resetGraphRange(); renderCharts(); }
+  });
+  byId("graph-range-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const start = parseRangeTimestamp(byId("graph-range-start").value);
+    const end = parseRangeTimestamp(byId("graph-range-end").value);
+    if (start === null || end === null || start > end) {
+      byId("graph-range-message").textContent = "開始・終了日時を正しい順序で指定してください。";
+      return;
+    }
+    graphRange = { start, end };
+    byId("graph-range-message").textContent = "指定範囲を表示中（JST）";
+    renderCharts();
   });
   byId("refresh-button").addEventListener("click", refresh);
   window.addEventListener("popstate", () => {
