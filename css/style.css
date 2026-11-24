@@ -253,10 +253,11 @@ td { padding-top: 6px; padding-bottom: 6px; }
 .session-meta { grid-column: 1 / -1; }
 .detail-meta .session-meta dd { font-size: .72rem; color: var(--text-secondary); overflow-wrap: anywhere; }
 
-.node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 10px; min-width: 0; }
-.node-controls label { color: var(--text-secondary); font-size: .8rem; }
-.node-controls small { color: var(--text-muted); font-size: .7rem; }
-.node-controls select { min-height: 44px; min-width: 0; max-width: 100%; flex: 1 1 350px; padding: 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; font-size: .8rem; }
-.node-controls button { font-size: .75rem; }
-.prediction { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 0; color: var(--text-secondary); font-size: .78rem; overflow-wrap: anywhere; }
+ .session-controls { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 70%; }
+.session-controls label { color: var(--text-muted); font-size: .7rem; }
+.session-controls select { min-height: 44px; min-width: 0; max-width: 100%; width: 210px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; font-size: .75rem; }
+.session-notice { display: block; color: var(--text-muted); font-size: .7rem; overflow-wrap: anywhere; }
+.session-notice:empty { display: none; }
+.prediction { grid-column: 2; grid-row: 4; display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 6px; color: var(--text-secondary); font-size: .7rem; overflow-wrap: anywhere; }
+.prediction > span:first-child { color: var(--text-muted); }
 .summary-prediction { display: block; color: var(--text-muted); font-weight: 400; font-size: .65rem; white-space: normal; }

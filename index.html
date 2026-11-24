@@ -25,26 +25,22 @@
       <div class="node-toolbar">
         <div id="node-chips" class="node-chips" role="group" aria-label="Node選択"><button class="node-chip" type="button" data-node="" aria-pressed="true">ALL</button></div>
       </div>
-      <div id="node-controls" class="node-controls" hidden>
-        <label for="session-select">Session <small>取得済みログの範囲</small></label>
-        <select id="session-select" aria-label="Session選択"></select>
-        <button id="current-session-button" type="button" hidden>現在Sessionへ</button>
-        <button id="pause-button" type="button">一時停止</button><small id="pause-note">このブラウザのみ</small>
-        <small id="session-notice" role="status"></small>
-      </div>
-      <p id="prediction" class="prediction" hidden><span>次回検知予測</span><span id="prediction-value"></span></p>
       <aside id="demo-notice" class="notice demo-notice" hidden><strong>デモ表示中</strong><span>サンプルデータです。</span><a href="./">通常表示へ</a></aside>
       <aside id="setup-notice" class="notice" hidden><strong>データの接続準備中</strong><a href="?demo=1">デモを見る</a></aside>
       <div id="update-error" class="notice error-notice" role="alert" hidden></div>
       <section id="alerts" class="alerts" aria-label="重要警告" aria-live="polite" hidden></section>
 
       <section class="latest-section" aria-labelledby="current-heading">
-        <div class="section-heading"><h2 id="current-heading">最新の状態</h2></div>
+        <div class="section-heading"><h2 id="current-heading">最新の状態</h2>
+          <div id="session-controls" class="session-controls" hidden><label for="session-select">Session</label><select id="session-select" aria-label="Session選択"></select></div>
+        </div>
+        <small id="session-notice" class="session-notice" role="status"></small>
         <div id="single-overview" class="single-overview">
           <article id="sensor-card" class="sensor-card tone-neutral">
             <h3 id="node-value" class="node-name">-</h3>
             <div id="sensor-value" class="sensor-value">UNKNOWN</div>
             <div class="received-summary"><span>最終受信</span><time id="last-received">-</time><span class="timezone">JST</span><p id="received-age">受信データなし</p></div>
+            <p id="prediction" class="prediction" hidden><span>次回予測</span><span id="prediction-value"></span></p>
             <p class="latest-event"><span>Event</span><span id="latest-event-value" class="badge tone-neutral">UNKNOWN</span></p>
           </article>
           <div id="detail-section" class="integrated-detail">

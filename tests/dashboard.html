@@ -30,7 +30,7 @@
       const results = document.getElementById("results");
       const summary = document.getElementById("summary");
       const now = Math.floor(Date.now() / 1000) * 1000;
-      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitTick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       let source = "";
       let passed = 0;
       let failed = 0;
@@ -38,7 +38,7 @@
       function assert(condition, message) { if (!condition) throw new Error(message); }
       async function until(condition) {
         const deadline = Date.now() + 12000;
-        while (!condition()) { if (Date.now() > deadline) throw new Error("画面更新の待機時間を超えました"); await pause(25); }
+        while (!condition()) { if (Date.now() > deadline) throw new Error("画面更新の待機時間を超えました"); await waitTick(25); }
       }
       function timestamp(ms = now) { return new Date(ms + 9 * 3600000).toISOString().slice(0, 19).replace("T", " "); }
       function log(overrides = {}) {
@@ -47,11 +47,7 @@
       // この関数は検証対象iframeでだけ実行する。
       function bootstrap(config, rows, options, fixedNow) {
         const state = window.__test = { rows, mode: options.mode ?? "ok", calls: [], intervals: [], errors: [], consoleErrors: [], shift: 0, generation: options.generation, search: options.search ?? "", url: "", urlWrites: 0 };
-        state.savedPause = options.paused ?? "[]";
-        Object.defineProperty(window, "localStorage", { value: {
-          getItem: () => { if (options.storageBlocked) throw new Error("storage unavailable"); return state.savedPause; },
-          setItem: (key, value) => { if (options.storageBlocked) throw new Error("storage unavailable"); state.savedPause = value; }
-        } });
+        Object.defineProperty(window, "localStorage", { get() { throw new Error("Unexpected storage access"); } });
         window.WANANA_CONFIG = config;
         // srcdoc内でURL選択を検証する。テストiframe以外のURL・履歴は変更しない。
         const NativeParams = window.URLSearchParams;
@@ -624,7 +620,7 @@
           await test("スマートフォン320/375/390px：全体横はみ出しなし・表スクロール", async () => {
             for (const width of [320, 375, 390]) {
               const win = await openNode([log()], {}, width);
-              await pause(100);
+              await waitTick(100);
               assert(win.document.documentElement.scrollWidth <= win.innerWidth, `${width}pxでページがはみ出します`);
               const table = win.document.querySelector(".table-scroll");
               assert(table.scrollWidth > table.clientWidth && win.getComputedStyle(table).overflowX === "auto", "履歴を横スクロールできません");
@@ -634,9 +630,9 @@
           await test("Desktop 1440px / Mobile 390px：ALLとNode表示の配置", async () => {
             for (const width of [1440, 390]) {
               const win = await open(multiLogs(), {}, width);
-              await pause(100);
+              await waitTick(100);
               assert(win.document.documentElement.scrollWidth <= win.innerWidth, "ALLが画面からはみ出します");
-              choose(win, "trap-02"); await pause(100);
+              choose(win, "trap-02"); await waitTick(100);
               assert(win.document.documentElement.scrollWidth <= win.innerWidth, "Node表示が画面からはみ出します");
               const clock = win.document.getElementById("current-clock").getBoundingClientRect();
               const selector = win.document.getElementById("node-chips").getBoundingClientRect();
@@ -650,7 +646,7 @@
           await test("Mobile 390/430px：Node chips横スクロール・キーボードfocus", async () => {
             for (const width of [390, 430]) {
               const win = await open(Array.from({ length: 16 }, (_, i) => log({ node: "trap-" + String(i + 1).padStart(2, "0") })), {}, width);
-              await pause(100);
+              await waitTick(100);
               const group = win.document.getElementById("node-chips");
               assert(win.getComputedStyle(group).overflowX === "auto" && group.scrollWidth > group.clientWidth && win.document.documentElement.scrollWidth <= win.innerWidth, "chips以外へ横はみ出ししています");
               const last = chips(win).at(-1);
@@ -781,24 +777,6 @@
             win.__test.rows = [receiverLog()]; await refresh(win);
             assert(text(win, "node-value") === "-" && text(win, "sensor-value") === "UNKNOWN" && text(win, "history-count") === "直近1件", "empty stateでデータを失いました");
           });
-          await test("Pause：保存・ALL除外・直接閲覧・再開・receiver対象外", async () => {
-            const win = await open([log({ sensor: "OPEN", batteryStatus: "CRITICAL" }), log({ node: "trap-02", timestamp: timestamp(now - 1000) }), receiverLog()]);
-            choose(win, "trap-01"); win.document.getElementById("pause-button").click();
-            assert(JSON.parse(win.__test.savedPause).join() === "trap-01" && text(win, "node-value") === "trap-01" && text(win, "sensor-value") === "OPEN" && visible(win, "alerts"), "Pauseで実データを改変しました");
-            choose(win, ""); assert(text(win, "node-value") === "trap-02" && !text(win, "alerts").includes("trap-01") && text(win, "node-chips").includes("PAUSED") && text(win, "history-count") === "直近3件", "Pause除外か履歴が不正");
-            choose(win, "receiver-01"); assert(!visible(win, "node-controls"), "receiverにpause操作があります");
-            choose(win, "trap-01"); assert(text(win, "prediction-value") === "PAUSED", "Pause中にアクティブ予測があります");
-            win.document.getElementById("pause-button").click(); choose(win, ""); assert(text(win, "node-value") === "trap-01" && JSON.parse(win.__test.savedPause).length === 0, "再開できません");
-          });
-          await test("Pause：壊れた値・重複・保存不可・再読込", async () => {
-            for (const paused of ["broken", "{}", "null", '[1,null,"receiver-01"]']) {
-              const win = await open([log()], { paused }); assert(text(win, "node-value") === "trap-01", "壊れた値で画面が壊れました");
-            }
-            const win = await open([log()], { paused: '["trap-01","trap-01"]' });
-            assert(text(win, "node-value") === "-", "保存済みPauseが復元されません");
-            choose(win, "trap-01"); win.document.getElementById("pause-button").click(); assert(JSON.parse(win.__test.savedPause).length === 0, "重複が残りました");
-            const blocked = await open([log()], { storageBlocked: true }); choose(blocked, "trap-01"); blocked.document.getElementById("pause-button").click(); assert(text(blocked, "pause-note").includes("保存できません"), "保存失敗が表示されません");
-          });
           await test("予測：0/1/2件・median・重複・別Session・非検知イベント除外", async () => {
             for (const count of [0,1,2,5]) {
               const offsets = [200000,190000,180000,170000,70000].slice(0,count);
@@ -817,20 +795,18 @@
             assert(select.options.length === 2 && select.options[0].textContent.includes("現在"), "Session一覧が不正");
             pickSession(win,"4000000000");
             assert(text(win, "current-heading") === "PAST SESSION" && text(win, "session-value") === "4000000000" && text(win, "history-count") === "直近1件" && dataset(win,"battery","trap-01").data.length === 1 && text(win,"battery-value") === "6.800", "過去Sessionが混在しました");
-            win.document.getElementById("current-session-button").click(); assert(text(win,"current-heading") === "最新の状態" && text(win,"session-value") === "100" && dataset(win,"battery","trap-01").data.length === 3, "現在へ戻れません");
+            pickSession(win, ""); assert(text(win,"current-heading") === "最新の状態" && text(win,"session-value") === "100" && dataset(win,"battery","trap-01").data.length === 3, "現在へ戻れません");
           });
           await test("明示的警告：SENSOR_FAULT・Battery・温度を維持、経過警告なし", async () => {
             const win = await open([log({ event:"SENSOR_FAULT", sensor:"FAULT", batteryStatus:"CRITICAL", temperatureStatus:"HOT", timestamp:timestamp(now-100*3600000) })]);
             assert(text(win,"alerts").includes("SENSOR_FAULT") && text(win,"alerts").includes("電池警告") && text(win,"alerts").includes("温度警告") && !text(win,"alerts").includes("経過"), "明示的警告が不正");
           });
-          await test("Desktop/Mobile：Session・Pause・予測の操作と横幅", async () => {
+          await test("Desktop/Mobile：Session・予測の操作と横幅", async () => {
             for(const width of [1440,390,430]) {
               const win = await open(sessionLogs(), {search:"?node=trap-01"}, width);
               pickSession(win,"4000000000");
-              assert(win.document.documentElement.scrollWidth <= win.innerWidth && visible(win,"node-controls") && text(win,"current-heading")==="PAST SESSION", "過去Sessionの横幅または操作が不正");
-              win.document.getElementById("pause-button").click();
-              assert(text(win,"prediction-value")==="PAUSED" && text(win,"session-value")==="4000000000", "Pauseで過去表示が変化しました");
-              win.document.getElementById("current-session-button").click();
+              assert(win.document.documentElement.scrollWidth <= win.innerWidth && visible(win,"session-controls") && text(win,"current-heading")==="PAST SESSION", "過去Sessionの横幅または操作が不正");
+              pickSession(win, "");
               assert(text(win,"session-value")==="100" && !text(win,"history-body").includes("4000000000"), "現在Sessionへの復帰が不正");
             }
           });
@@ -839,6 +815,12 @@
             await refresh(win); assert(text(win,"session-value")==="4000000000", "更新で過去選択を失いました");
             win.__test.rows=[log({sessionId:"new"})]; await refresh(win);
             assert(text(win,"session-value")==="new" && text(win,"session-notice").includes("取得範囲") && text(win,"current-heading")==="最新の状態", "取得範囲外を説明していません");
+          });
+          await test("配置：Sessionは既存見出し内・予測は状態カード内・操作の重複なし", async () => {
+            const win = await open([log()], {search:"?node=trap-01"});
+            assert(win.document.querySelector(".latest-section .section-heading #session-controls") && win.document.querySelector("#sensor-card #prediction"), "既存コンテンツへ統合されていません");
+            assert(win.document.querySelectorAll("#session-select").length===1 && win.document.querySelectorAll(".session-controls button").length===0, "重複操作が残っています");
+            assert(win.document.querySelector("#main").children[1].id === "demo-notice", "メイン上部に操作領域が残っています");
           });
         } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }
         finally { summary.textContent = `完了：${passed} PASS / ${failed} FAIL`; button.disabled = false; }

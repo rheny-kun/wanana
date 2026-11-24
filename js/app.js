@@ -26,9 +26,6 @@
   let selectedSession = null;
   let sessionHistoryFiltered = false;
   let sessionNotice = "";
-  const pauseKey = "wanana.pausedNodes";
-  let pauseSaveFailed = false;
-  let pausedNodes = readPausedNodes();
   let firstSelection = true;
   let latestByNode = new Map();
   let lastAlertSignature = null;
@@ -134,28 +131,6 @@
     return Number(isReceiverNode(a)) - Number(isReceiverNode(b)) || a.localeCompare(b, "ja", { numeric: true });
   }
 
-  function readPausedNodes() {
-    try {
-      const values = JSON.parse(window.localStorage.getItem(pauseKey) ?? "[]");
-      return new Set(Array.isArray(values) ? values.filter((node) => typeof node === "string" && node.trim() && node.length <= 200 && !isReceiverNode(node)) : []);
-    } catch { return new Set(); }
-  }
-
-  function isNodePaused(node) { return !isReceiverNode(node) && pausedNodes.has(node); }
-
-  function toggleNodePause() {
-    if (selectedNode === null || isReceiverNode(selectedNode)) return;
-    if (isNodePaused(selectedNode)) pausedNodes.delete(selectedNode);
-    else pausedNodes.add(selectedNode);
-    try {
-      window.localStorage.setItem(pauseKey, JSON.stringify([...pausedNodes].sort(compareNodes)));
-      pauseSaveFailed = false;
-    } catch { pauseSaveFailed = true; }
-    renderNodeChips();
-    renderOverview();
-    renderView();
-  }
-
   function getNodeSessions(node) {
     const sessions = new Map();
     for (const log of logs) {
@@ -185,7 +160,6 @@
   }
 
   function predictionText(node, session) {
-    if (isNodePaused(node)) return "PAUSED";
     const prediction = predictNextDetection(node, session);
     if (prediction.next === null) return `予測には2件以上の検知が必要（${prediction.count}件）`;
     return `${formatJst(prediction.next)} JST 頃 · 検知${prediction.count}件${prediction.count === 2 ? " · 参考値" : ""}${prediction.next < Date.now() ? " · 予測時刻経過" : ""}`;
@@ -197,24 +171,22 @@
 
   function renderNodeControls() {
     const normal = selectedNode !== null && !isReceiverNode(selectedNode);
-    byId("node-controls").hidden = !normal;
+    byId("session-controls").hidden = !normal;
     const selector = byId("session-select");
     selector.replaceChildren();
     for (const session of getNodeSessions(selectedNode)) {
       const option = document.createElement("option");
       const current = session.id === latestSessionId(selectedNode);
       option.value = current ? "" : session.id;
-      option.textContent = `${current ? "現在" : "過去"} / ${session.id} · ${formatJst(session.start)} ～ ${formatJst(session.end)} JST`;
+      option.textContent = `${current ? "現在" : "過去"} / ${session.id}`;
+      option.title = `${formatJst(session.start)} ～ ${formatJst(session.end)} JST（取得範囲）`;
       selector.append(option);
     }
     if (!selector.children.length || latestSessionId(selectedNode) === null) {
       const option = document.createElement("option"); option.value = ""; option.textContent = "現在 / Session不明"; selector.prepend(option);
     }
     selector.value = selectedSession ?? "";
-    byId("current-session-button").hidden = selectedSession === null;
-    byId("pause-button").textContent = isNodePaused(selectedNode) ? "再開" : "一時停止";
     byId("session-notice").textContent = sessionNotice;
-    byId("pause-note").textContent = pauseSaveFailed ? "保存できませんでした。この画面内のみ有効です。" : "このブラウザのみ";
     const log = displayLog();
     byId("prediction").hidden = !log || isReceiver(log);
     byId("prediction-value").textContent = log ? predictionText(log.node, log.sessionId) : "";
@@ -278,7 +250,7 @@
       name.textContent = node ?? "ALL";
       button.append(name);
       const log = latestByNode.get(node);
-      const stateBadge = log ? badge(isNodePaused(node) ? "PAUSED" : nodeState(log), isNodePaused(node) ? "neutral" : sensorTones[nodeState(log)]) : null;
+      const stateBadge = log ? badge(nodeState(log), sensorTones[nodeState(log)]) : null;
       if (stateBadge) button.append(stateBadge);
       button.addEventListener("click", () => selectNode(node));
       nodeChips.push({ node, button, stateBadge, log });
@@ -320,7 +292,7 @@
     for (const [node, log] of [...latestByNode].sort(([a], [b]) => compareNodes(a, b))) {
       const button = document.createElement("button");
       button.type = "button";
-      const state = isNodePaused(node) ? "PAUSED" : nodeState(log);
+      const state = nodeState(log);
       button.className = `node-summary tone-${sensorTones[state] ?? "neutral"}`;
       button.dataset.node = node;
       button.setAttribute("aria-label", `${node} ${state}、最終受信 ${formatJst(log.timestamp)} JST。詳細を表示`);
@@ -359,7 +331,7 @@
     focusNode = null;
     let newest = -Infinity;
     for (const [node, log] of latestByNode) {
-      if (isReceiverNode(node) || isNodePaused(node)) continue;
+      if (isReceiverNode(node)) continue;
       const timestamp = log.timestamp ?? -Infinity;
       // 同時刻・全件日時不明の場合はNode名順で安定させる。配列の並びには依存しない。
       if (focusNode === null || timestamp > newest || (timestamp === newest && node.localeCompare(focusNode, "ja", { numeric: true }) < 0)) {
@@ -400,7 +372,7 @@
     byId("sensor-card").className = `sensor-card tone-${sensorTones[state] ?? "neutral"}`;
     if (byId("sensor-value").textContent !== state) byId("sensor-value").textContent = state;
     for (const { button, stateBadge, log } of overviewStates) {
-      const current = isNodePaused(log.node) ? "PAUSED" : nodeState(log);
+      const current = nodeState(log);
       if (stateBadge.textContent === current) continue;
       stateBadge.textContent = current;
       stateBadge.className = `badge tone-${sensorTones[current] ?? "neutral"}`;
@@ -409,7 +381,7 @@
     }
     for (const { stateBadge, log } of nodeChips) {
       if (!stateBadge) continue;
-      const current = isNodePaused(log.node) ? "PAUSED" : nodeState(log);
+      const current = nodeState(log);
       if (stateBadge.textContent === current) continue;
       stateBadge.textContent = current;
       stateBadge.className = `badge tone-${sensorTones[current] ?? "neutral"}`;
@@ -420,7 +392,7 @@
   function renderAlerts() {
     const alerts = byId("alerts");
     const messages = [];
-    const targets = selectedNode === null ? [...latestByNode.values()].filter((log) => !isNodePaused(log.node)) : [displayLog()].filter(Boolean);
+    const targets = selectedNode === null ? [...latestByNode.values()] : [displayLog()].filter(Boolean);
     function add(log, message, danger = false) {
       messages.push({ text: `${log.node} · ${message}`, danger });
     }
@@ -693,11 +665,6 @@
     sessionHistoryFiltered = true;
     sessionNotice = "";
     renderView();
-  });
-  byId("current-session-button").addEventListener("click", () => { selectedSession = null; sessionHistoryFiltered = true; sessionNotice = ""; renderView(); });
-  byId("pause-button").addEventListener("click", toggleNodePause);
-  window.addEventListener("storage", (event) => {
-    if (event.key === pauseKey || event.key === null) { pausedNodes = readPausedNodes(); renderNodeChips(); renderOverview(); renderView(); }
   });
   byId("refresh-button").addEventListener("click", refresh);
   window.addEventListener("popstate", () => {
