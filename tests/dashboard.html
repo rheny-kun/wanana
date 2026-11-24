@@ -47,6 +47,11 @@
       // この関数は検証対象iframeでだけ実行する。
       function bootstrap(config, rows, options, fixedNow) {
         const state = window.__test = { rows, mode: options.mode ?? "ok", calls: [], intervals: [], errors: [], consoleErrors: [], shift: 0, generation: options.generation, search: options.search ?? "", url: "", urlWrites: 0 };
+        state.savedPause = options.paused ?? "[]";
+        Object.defineProperty(window, "localStorage", { value: {
+          getItem: () => { if (options.storageBlocked) throw new Error("storage unavailable"); return state.savedPause; },
+          setItem: (key, value) => { if (options.storageBlocked) throw new Error("storage unavailable"); state.savedPause = value; }
+        } });
         window.WANANA_CONFIG = config;
         // srcdoc内でURL選択を検証する。テストiframe以外のURL・履歴は変更しない。
         const NativeParams = window.URLSearchParams;
@@ -179,16 +184,16 @@
             const win = await openNode([log(overrides)]);
             assert(visible(win, "alerts") && text(win, "alerts").includes(expected), "警告がありません");
           });
-          await test("無通信しきい値：2時間29分59秒→2時間30分・取得なしでも警告", async () => {
+          await test("経過時間：2時間30分を超えても時間警告なし", async () => {
             const win = await openNode([log({ timestamp: timestamp(now - 8999000) })]);
             assert(!visible(win, "alerts"), "しきい値前に警告しました");
             win.__test.shift = 1000;
             win.__test.intervals.find((timer) => timer.ms === 1000).callback();
-            assert(text(win, "alerts").includes("150分"), "しきい値ちょうどで警告しませんでした");
+            assert(!visible(win, "alerts"), "時間経過だけで警告しました");
           });
-          await test("OPEN・無通信・電池・温度の4警告を同時表示", async () => {
+          await test("OPEN・電池・温度の3警告を同時表示", async () => {
             const win = await openNode([log({ sensor: "OPEN", timestamp: timestamp(now - 9000000), batteryStatus: "CRITICAL", temperatureStatus: "CRITICAL" })]);
-            assert(win.document.querySelectorAll("#alerts .alert").length === 4, "4つの警告が揃いません");
+            assert(win.document.querySelectorAll("#alerts .alert").length === 3, "3つの警告が揃いません");
           });
           await test("LoRa全件null/欠損：データなし・他2グラフは維持", async () => {
             const missing = log(); delete missing.loraRssi;
@@ -337,9 +342,9 @@
             choose(win, payload);
             assert(text(win, "node-value") === payload && new URL(win.__test.url).searchParams.get("node") === payload, "特殊文字Nodeを選択できません");
           });
-          await test("各Nodeの無通信判定・ヘッダーの秒時計・最終更新を分離", async () => {
+          await test("経過時間の警告なし・ヘッダーの秒時計・最終更新を分離", async () => {
             const win = await open([log(), log({ node: "trap-02", timestamp: timestamp(now - 9000000) })]);
-            assert(text(win, "alerts").includes("trap-02") && text(win, "alerts").includes("150分"), "古いNodeの無通信を検出しません");
+            assert(!visible(win, "alerts"), "時間経過で警告しました");
             const updated = text(win, "update-status");
             const clock = text(win, "current-clock");
             win.__test.shift = 1000; win.__test.intervals.find((timer) => timer.ms === 1000).callback();
@@ -436,9 +441,11 @@
             // テスト時計を最新受信に合わせる。未来日時の間はUNKNOWNを許容する。
             win.__test.shift = 1000; win.__test.intervals.find((timer) => timer.ms === 1000).callback();
             assert(chips(win).some((chip) => chip.dataset.node === "receiver-01"), "receiverが選択肢にありません");
-            assert(activeNode(win) === "" && text(win, "node-value") === "receiver-01" && text(win, "sensor-value") === "ONLINE", "ALLのreceiver状態が不正");
+            assert(activeNode(win) === "" && text(win, "node-value") === "trap-03", "ALLにreceiverが入りました");
+            choose(win, "receiver-01");
             assert(text(win, "battery-value") === "—" && text(win, "temperature-value") === "—" && text(win, "lora-value") === "—" && text(win, "battery-status") === "—" && text(win, "temperature-status") === "—", "null項目をエラー扱いしています");
             assert(text(win, "wifi-value") === "-33" && text(win, "latest-event-value") === "RECEIVER_HEALTH" && text(win, "message-value") === "15", "receiver詳細が不正");
+            choose(win, "");
             assert(["battery", "temperature", "lora"].every((key) => chart(win, key + "-chart").data.datasets.length === 3 && !dataset(win, key, "receiver-01")), "receiverをtrap比較へ含めています");
             choose(win, "receiver-01");
             assert(["battery", "temperature", "lora"].every((key) => visible(win, key + "-empty") && !chart(win, key + "-chart")), "receiver単独のnullからグラフを作成しています");
@@ -450,18 +457,18 @@
             assert(text(win, "sensor-value") === "ONLINE" && text(win, "event-value") === event && win.document.getElementById("latest-event-value").classList.contains("tone-" + tone), "receiverイベント・色が不正");
             assert(!text(win, "history-body").includes("INVALID") && !visible(win, "alerts"), "null項目が警告やINVALIDになりました");
           });
-          await test("receiver：3時間でtrap用無通信警告を出さない・15時間ちょうどでOFFLINE", async () => {
-            const win = await open([receiverLog({ timestamp: timestamp(now - 3 * 3600000) })]);
+          await test("receiver：3時間・15時間でも時間警告なし", async () => {
+            const win = await open([receiverLog({ timestamp: timestamp(now - 3 * 3600000) })], { search: "?node=receiver-01" });
             assert(text(win, "sensor-value") === "ONLINE" && !visible(win, "alerts"), "receiverへtrap閾値を適用しました");
             win.__test.shift = 12 * 3600000 - 1000;
             win.__test.intervals.find((timer) => timer.ms === 1000).callback();
             assert(text(win, "sensor-value") === "ONLINE" && !visible(win, "alerts"), "15時間前に警告しました");
             win.__test.shift += 1000;
             win.__test.intervals.find((timer) => timer.ms === 1000).callback();
-            assert(text(win, "sensor-value") === "OFFLINE" && text(win, "alerts").includes("900分") && text(win, "node-list").includes("OFFLINE") && chips(win).find((chip) => chip.dataset.node === "receiver-01").textContent.includes("OFFLINE"), "15時間しきい値で警告しません");
+            assert(text(win, "sensor-value") === "ONLINE" && !visible(win, "alerts"), "時間経過でreceiverを異常扱いしました");
           });
           await test("receiver：API失敗時にreceiver詳細保持・未知イベントと日時不明も安全", async () => {
-            const win = await open([receiverLog()]);
+            const win = await open([receiverLog()], { search: "?node=receiver-01" });
             win.__test.mode = "network"; await refresh(win);
             assert(visible(win, "update-error") && text(win, "sensor-value") === "ONLINE" && text(win, "wifi-value") === "-33", "失敗でreceiver詳細を失いました");
             win.__test.mode = "ok"; win.__test.rows = [receiverLog({ event: "LORA_SILENCE", timestamp: "bad" })]; await refresh(win);
@@ -500,7 +507,7 @@
               const context = { dataset: b, parsed: b.data[0] };
               assert(instance.options.plugins.tooltip.callbacks.title([context]).includes(timestamp(now - 5100000)) && instance.options.plugins.tooltip.callbacks.label(context).includes("trap-02"), "tooltipにNode・時刻がありません");
             }
-            assert(activeNode(win) === "" && text(win, "node-value") === "receiver-01" && text(win, "history-count") === "直近6件", "比較がfocusNode・ALL履歴へ影響しました");
+            assert(activeNode(win) === "" && text(win, "node-value") === "trap-01" && text(win, "history-count") === "直近6件", "比較がfocusNode・ALL履歴へ影響しました");
             choose(win, "trap-02");
             assert(["battery", "temperature", "lora"].every((key) => chart(win, key + "-chart").data.datasets.length === 1 && !chart(win, key + "-chart").options.plugins.legend.display), "Node指定のdataset数・legendが不正");
           });
@@ -564,12 +571,12 @@
             assert(dataset(win, "battery", "trap-01").data.map((point) => point.y).join(",") === "8.4,8.3,8.2", "boot変化・messageIdリセットで同sessionを切りました");
             assert(text(win, "history-body").includes("4000000000") && text(win, "history-body").includes("100") && text(win, "history-count") === "直近4件", "履歴から旧sessionを消しました");
           });
-          await test("Session：ALLは各Node自身の最新session・focusはreceiverのまま", async () => {
+          await test("Session：ALLは各通常Node自身の最新session・receiverをfocus除外", async () => {
             const win = await open(sessionLogs());
             for (const key of ["battery", "temperature", "lora"]) {
               assert(dataset(win, key, "trap-01").data.length === 3 && dataset(win, key, "trap-02").data.length === 2 && !dataset(win, key, "receiver-01"), "Nodeごとの最新sessionで比較していません");
             }
-            assert(text(win, "session-value") === "R-new" && text(win, "node-value") === "receiver-01" && text(win, "sensor-value") === "ONLINE" && text(win, "history-count") === "直近9件", "session追加でfocus・receiver・全履歴を壊しました");
+            assert(text(win, "session-value") === "100" && text(win, "node-value") === "trap-01" && text(win, "sensor-value") === "CLOSED" && text(win, "history-count") === "直近9件", "session追加でfocus・receiver・全履歴を壊しました");
           });
           await test("Session：更新で新sessionへ置換し、messageId=1の旧点を残さない", async () => {
             const win = await open(sessionLogs(), { search: "?node=trap-01" });
@@ -658,7 +665,7 @@
             assert(win.__test.http.status === 200 && win.__test.http.redirected && win.__test.http.contentType.includes("application/json"), "HTTP/redirect/JSON応答が不正");
             const request = new URL(win.__test.calls[0].url);
             assert(request.searchParams.get("action") === "logs" && request.searchParams.get("limit") === "1000", "logs取得queryが欠損");
-            assert(chips(win).length === 4 && text(win, "node-value") === "receiver-01" && text(win, "sensor-value") === "ONLINE" && text(win, "wifi-value") === "-35", "実HTTP JSONが画面へ届きません");
+            assert(chips(win).length === 4 && text(win, "node-value") === "trap-02" && text(win, "sensor-value") === "CLOSED", "実HTTP JSONが画面へ届きません");
             assert(text(win, "history-count") === "直近4件" && text(win, "history-body").includes("4000000000") && dataset(win, "battery", "trap-01").data.length === 1, "履歴/session分離が不正");
             choose(win, "trap-01");
             assert(text(win, "sensor-value") === "CLOSED" && text(win, "session-value") === "100", "trap最新状態が不正");
@@ -700,6 +707,7 @@
             const win = await open([log({ battery: null, batteryStatus: "CRITICAL", temperature: "", temperatureStatus: "HOT" })]);
             assert(text(win, "battery-status") === "INVALID" && text(win, "temperature-status") === "INVALID" && !visible(win, "alerts"), "計測値がないのに値の警告を出しました");
             win.__test.rows = [receiverLog({ sensor: "", battery: "", batteryStatus: "", temperature: "", temperatureStatus: "", loraRssi: "" })]; await refresh(win);
+            choose(win, "receiver-01");
             assert(text(win, "sensor-value") === "ONLINE" && text(win, "wifi-value") === "-33" && text(win, "battery-value") === "—" && !visible(win, "alerts"), "receiverの空文字をrejectしました");
           });
           for (const [mode, category] of [["network", "network"], ["http", "http"], ["json", "json"], ["ok", "validation"], ["timeout", "timeout"], ["body-timeout", "timeout"]]) await test("初回失敗：" + category + "/" + mode + "・空状態・分類・復旧", async () => {
@@ -762,6 +770,75 @@
             win.__test.rows = rows; await refresh(win);
             assert(Object.keys(win.Chart.instances).length === 3 && text(win, "history-count") === "直近50件", "再作成または履歴上限が不正");
             results.textContent += `INFO 1000件・10回更新・Node切替: ${Math.round(performance.now() - started)} ms\n`;
+          });
+          const pickSession = (win, value) => {
+            const select = win.document.getElementById("session-select"); select.value = value; select.dispatchEvent(new win.Event("change"));
+          };
+          await test("Node順・receiver最新除外・receiverのみのempty state", async () => {
+            const win = await open([receiverLog(), log({ timestamp: timestamp(now - 1000) }), log({ node: "trap-02", timestamp: timestamp(now - 2000) })]);
+            assert(chips(win).map(chip => chip.dataset.node).join(",") === ",trap-01,trap-02,receiver-01", "Node順が不正");
+            assert(text(win, "node-value") === "trap-01", "receiverがfocusです");
+            win.__test.rows = [receiverLog()]; await refresh(win);
+            assert(text(win, "node-value") === "-" && text(win, "sensor-value") === "UNKNOWN" && text(win, "history-count") === "直近1件", "empty stateでデータを失いました");
+          });
+          await test("Pause：保存・ALL除外・直接閲覧・再開・receiver対象外", async () => {
+            const win = await open([log({ sensor: "OPEN", batteryStatus: "CRITICAL" }), log({ node: "trap-02", timestamp: timestamp(now - 1000) }), receiverLog()]);
+            choose(win, "trap-01"); win.document.getElementById("pause-button").click();
+            assert(JSON.parse(win.__test.savedPause).join() === "trap-01" && text(win, "node-value") === "trap-01" && text(win, "sensor-value") === "OPEN" && visible(win, "alerts"), "Pauseで実データを改変しました");
+            choose(win, ""); assert(text(win, "node-value") === "trap-02" && !text(win, "alerts").includes("trap-01") && text(win, "node-chips").includes("PAUSED") && text(win, "history-count") === "直近3件", "Pause除外か履歴が不正");
+            choose(win, "receiver-01"); assert(!visible(win, "node-controls"), "receiverにpause操作があります");
+            choose(win, "trap-01"); assert(text(win, "prediction-value") === "PAUSED", "Pause中にアクティブ予測があります");
+            win.document.getElementById("pause-button").click(); choose(win, ""); assert(text(win, "node-value") === "trap-01" && JSON.parse(win.__test.savedPause).length === 0, "再開できません");
+          });
+          await test("Pause：壊れた値・重複・保存不可・再読込", async () => {
+            for (const paused of ["broken", "{}", "null", '[1,null,"receiver-01"]']) {
+              const win = await open([log()], { paused }); assert(text(win, "node-value") === "trap-01", "壊れた値で画面が壊れました");
+            }
+            const win = await open([log()], { paused: '["trap-01","trap-01"]' });
+            assert(text(win, "node-value") === "-", "保存済みPauseが復元されません");
+            choose(win, "trap-01"); win.document.getElementById("pause-button").click(); assert(JSON.parse(win.__test.savedPause).length === 0, "重複が残りました");
+            const blocked = await open([log()], { storageBlocked: true }); choose(blocked, "trap-01"); blocked.document.getElementById("pause-button").click(); assert(text(blocked, "pause-note").includes("保存できません"), "保存失敗が表示されません");
+          });
+          await test("予測：0/1/2件・median・重複・別Session・非検知イベント除外", async () => {
+            for (const count of [0,1,2,5]) {
+              const offsets = [200000,190000,180000,170000,70000].slice(0,count);
+              const rows = offsets.map(ms => log({ timestamp: timestamp(now-ms), event: "TRAP_OPEN" }));
+              rows.push(log(), log({ event: "MAGNET", timestamp: timestamp(now-60000) }), log({ event: "BOOT", timestamp: timestamp(now-50000) }), log({ event: "TRAP_OPEN", sessionId: "old", timestamp: timestamp(now-300000) }));
+              if (count) rows.push({ ...rows[0] });
+              const win = await open(rows);
+              const prediction = text(win, "prediction-value");
+              assert(count < 2 ? prediction.includes("2件以上") : prediction.includes(timestamp(now-(count===2 ? 180000 : 60000))) && prediction.includes(`検知${count}件`), "予測の件数またはmedianが不正");
+              if(count===2) assert(prediction.includes("参考値"), "2件で精度を誇張しました");
+            }
+          });
+          await test("Session：過去選択で表示・グラフ・履歴・予測を分離し現在へ戻る", async () => {
+            const win = await open(sessionLogs(), { search: "?node=trap-01" });
+            const select = win.document.getElementById("session-select");
+            assert(select.options.length === 2 && select.options[0].textContent.includes("現在"), "Session一覧が不正");
+            pickSession(win,"4000000000");
+            assert(text(win, "current-heading") === "PAST SESSION" && text(win, "session-value") === "4000000000" && text(win, "history-count") === "直近1件" && dataset(win,"battery","trap-01").data.length === 1 && text(win,"battery-value") === "6.800", "過去Sessionが混在しました");
+            win.document.getElementById("current-session-button").click(); assert(text(win,"current-heading") === "最新の状態" && text(win,"session-value") === "100" && dataset(win,"battery","trap-01").data.length === 3, "現在へ戻れません");
+          });
+          await test("明示的警告：SENSOR_FAULT・Battery・温度を維持、経過警告なし", async () => {
+            const win = await open([log({ event:"SENSOR_FAULT", sensor:"FAULT", batteryStatus:"CRITICAL", temperatureStatus:"HOT", timestamp:timestamp(now-100*3600000) })]);
+            assert(text(win,"alerts").includes("SENSOR_FAULT") && text(win,"alerts").includes("電池警告") && text(win,"alerts").includes("温度警告") && !text(win,"alerts").includes("経過"), "明示的警告が不正");
+          });
+          await test("Desktop/Mobile：Session・Pause・予測の操作と横幅", async () => {
+            for(const width of [1440,390,430]) {
+              const win = await open(sessionLogs(), {search:"?node=trap-01"}, width);
+              pickSession(win,"4000000000");
+              assert(win.document.documentElement.scrollWidth <= win.innerWidth && visible(win,"node-controls") && text(win,"current-heading")==="PAST SESSION", "過去Sessionの横幅または操作が不正");
+              win.document.getElementById("pause-button").click();
+              assert(text(win,"prediction-value")==="PAUSED" && text(win,"session-value")==="4000000000", "Pauseで過去表示が変化しました");
+              win.document.getElementById("current-session-button").click();
+              assert(text(win,"session-value")==="100" && !text(win,"history-body").includes("4000000000"), "現在Sessionへの復帰が不正");
+            }
+          });
+          await test("過去Session：更新時の選択維持・取得範囲外の案内", async () => {
+            const win=await open(sessionLogs(),{search:"?node=trap-01"}); pickSession(win,"4000000000");
+            await refresh(win); assert(text(win,"session-value")==="4000000000", "更新で過去選択を失いました");
+            win.__test.rows=[log({sessionId:"new"})]; await refresh(win);
+            assert(text(win,"session-value")==="new" && text(win,"session-notice").includes("取得範囲") && text(win,"current-heading")==="最新の状態", "取得範囲外を説明していません");
           });
         } catch (error) { failed++; results.textContent += `FAIL 検証環境: ${error.message}\n`; }
         finally { summary.textContent = `完了：${passed} PASS / ${failed} FAIL`; button.disabled = false; }

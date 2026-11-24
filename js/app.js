@@ -6,10 +6,10 @@
   const demo = config.USE_DEMO_DATA || parameters.get("demo") === "1";
   const requestedNode = parameters.get("node");
   const byId = (id) => document.getElementById(id);
-  const sensorTones = { OPEN: "danger", CLOSED: "ok", ONLINE: "cyan", OFFLINE: "danger", UNKNOWN: "neutral" };
+  const sensorTones = { OPEN: "danger", CLOSED: "ok", ONLINE: "cyan", OFFLINE: "danger", FAULT: "danger", UNKNOWN: "neutral" };
   const batteryTones = { NORMAL: "ok", LOW: "warning", CRITICAL: "danger", INVALID: "neutral" };
   const temperatureTones = { NORMAL: "ok", WARM: "warning", HOT: "hot", CRITICAL: "danger", INVALID: "neutral" };
-  const eventTones = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "danger", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", RECEIVER_BOOT: "purple", RECEIVER_HEALTH: "cyan", UNKNOWN: "neutral" };
+  const eventTones = { BOOT: "hot", MAGNET: "cyan", TRAP_OPEN: "danger", TRAP_CLOSED: "ok", HEALTH_TIMER: "blue", RECEIVER_BOOT: "purple", RECEIVER_HEALTH: "cyan", SENSOR_FAULT: "danger", UNKNOWN: "neutral" };
   const logFields = ["timestamp", "node", "sessionId", "event", "sensor", "battery", "batteryStatus", "temperature", "temperatureStatus", "messageId", "boot", "send", "wifiRssi", "loraRssi"];
   const chartDefinitions = [
     { key: "battery", label: "Battery Voltage", unit: "V", empty: "Batteryデータなし" },
@@ -23,6 +23,12 @@
   let invalidRows = 0;
   let selectedNode = null; // null = ALL
   let focusNode = null;
+  let selectedSession = null;
+  let sessionHistoryFiltered = false;
+  let sessionNotice = "";
+  const pauseKey = "wanana.pausedNodes";
+  let pauseSaveFailed = false;
+  let pausedNodes = readPausedNodes();
   let firstSelection = true;
   let latestByNode = new Map();
   let lastAlertSignature = null;
@@ -80,7 +86,7 @@
       timestamp: parseTimestamp(row.timestamp),
       sessionId: sessionId(row.sessionId),
       node: row.node,
-      sensor: row.sensor === "OPEN" || row.sensor === "CLOSED" ? row.sensor : "UNKNOWN",
+      sensor: row.sensor === "OPEN" || row.sensor === "CLOSED" || row.sensor === "FAULT" ? row.sensor : "UNKNOWN",
       event: known(row.event, eventTones, "UNKNOWN"),
       battery: number(row.battery),
       batteryStatus: known(row.batteryStatus, batteryTones, "INVALID"),
@@ -115,21 +121,108 @@
   }
 
   function visibleLogs() {
-    return selectedNode === null ? logs : logs.filter((log) => log.node === selectedNode);
+    return selectedNode === null ? logs : logs.filter((log) => log.node === selectedNode && (!sessionHistoryFiltered || isReceiverNode(selectedNode) || log.sessionId === (selectedSession ?? latestSessionId(selectedNode))));
   }
 
-  function isReceiver(log) {
-    return log?.node.startsWith("receiver-") ?? false;
+  function isReceiverNode(node) {
+    return typeof node === "string" && node.startsWith("receiver-");
   }
 
-  function warningThreshold(log) {
-    return isReceiver(log) ? config.RECEIVER_NO_COMMUNICATION_WARNING_MS : config.NO_COMMUNICATION_WARNING_MS;
+  function isReceiver(log) { return isReceiverNode(log?.node); }
+
+  function compareNodes(a, b) {
+    return Number(isReceiverNode(a)) - Number(isReceiverNode(b)) || a.localeCompare(b, "ja", { numeric: true });
+  }
+
+  function readPausedNodes() {
+    try {
+      const values = JSON.parse(window.localStorage.getItem(pauseKey) ?? "[]");
+      return new Set(Array.isArray(values) ? values.filter((node) => typeof node === "string" && node.trim() && node.length <= 200 && !isReceiverNode(node)) : []);
+    } catch { return new Set(); }
+  }
+
+  function isNodePaused(node) { return !isReceiverNode(node) && pausedNodes.has(node); }
+
+  function toggleNodePause() {
+    if (selectedNode === null || isReceiverNode(selectedNode)) return;
+    if (isNodePaused(selectedNode)) pausedNodes.delete(selectedNode);
+    else pausedNodes.add(selectedNode);
+    try {
+      window.localStorage.setItem(pauseKey, JSON.stringify([...pausedNodes].sort(compareNodes)));
+      pauseSaveFailed = false;
+    } catch { pauseSaveFailed = true; }
+    renderNodeChips();
+    renderOverview();
+    renderView();
+  }
+
+  function getNodeSessions(node) {
+    const sessions = new Map();
+    for (const log of logs) {
+      if (log.node !== node || log.sessionId === null) continue;
+      if (!sessions.has(log.sessionId)) sessions.set(log.sessionId, { id: log.sessionId, start: null, end: null });
+      const session = sessions.get(log.sessionId);
+      if (log.timestamp !== null) {
+        session.start = Math.min(session.start ?? Infinity, log.timestamp);
+        session.end = Math.max(session.end ?? -Infinity, log.timestamp);
+      }
+    }
+    return [...sessions.values()].sort((a, b) => (b.end ?? -Infinity) - (a.end ?? -Infinity) || a.id.localeCompare(b.id));
+  }
+
+  // TRAP_OPEN is the explicit detection event; BOOT, MAGNET and HEALTH_TIMER are excluded.
+  function getDetectionEvents(node, session) {
+    return [...new Set(logs.filter((log) => log.node === node && session !== null && log.sessionId === session && log.event === "TRAP_OPEN" && log.timestamp !== null && log.timestamp <= Date.now()).map((log) => log.timestamp))].sort((a, b) => a - b);
+  }
+
+  function predictNextDetection(node, session) {
+    const times = getDetectionEvents(node, session);
+    if (times.length < 2) return { count: times.length, next: null };
+    const intervals = times.slice(1).map((time, i) => time - times[i]).sort((a, b) => a - b);
+    const middle = Math.floor(intervals.length / 2);
+    const median = intervals.length % 2 ? intervals[middle] : (intervals[middle - 1] + intervals[middle]) / 2;
+    return { count: times.length, next: times.at(-1) + median };
+  }
+
+  function predictionText(node, session) {
+    if (isNodePaused(node)) return "PAUSED";
+    const prediction = predictNextDetection(node, session);
+    if (prediction.next === null) return `予測には2件以上の検知が必要（${prediction.count}件）`;
+    return `${formatJst(prediction.next)} JST 頃 · 検知${prediction.count}件${prediction.count === 2 ? " · 参考値" : ""}${prediction.next < Date.now() ? " · 予測時刻経過" : ""}`;
+  }
+
+  function displayLog() {
+    return selectedSession === null ? latestByNode.get(focusNode) : visibleLogs()[0];
+  }
+
+  function renderNodeControls() {
+    const normal = selectedNode !== null && !isReceiverNode(selectedNode);
+    byId("node-controls").hidden = !normal;
+    const selector = byId("session-select");
+    selector.replaceChildren();
+    for (const session of getNodeSessions(selectedNode)) {
+      const option = document.createElement("option");
+      const current = session.id === latestSessionId(selectedNode);
+      option.value = current ? "" : session.id;
+      option.textContent = `${current ? "現在" : "過去"} / ${session.id} · ${formatJst(session.start)} ～ ${formatJst(session.end)} JST`;
+      selector.append(option);
+    }
+    if (!selector.children.length || latestSessionId(selectedNode) === null) {
+      const option = document.createElement("option"); option.value = ""; option.textContent = "現在 / Session不明"; selector.prepend(option);
+    }
+    selector.value = selectedSession ?? "";
+    byId("current-session-button").hidden = selectedSession === null;
+    byId("pause-button").textContent = isNodePaused(selectedNode) ? "再開" : "一時停止";
+    byId("session-notice").textContent = sessionNotice;
+    byId("pause-note").textContent = pauseSaveFailed ? "保存できませんでした。この画面内のみ有効です。" : "このブラウザのみ";
+    const log = displayLog();
+    byId("prediction").hidden = !log || isReceiver(log);
+    byId("prediction-value").textContent = log ? predictionText(log.node, log.sessionId) : "";
   }
 
   function nodeState(log) {
     if (!log || log.timestamp === null || log.sessionId === null) return "UNKNOWN";
-    if (!isReceiver(log)) return log?.sensor ?? "UNKNOWN";
-    return Date.now() - log.timestamp >= warningThreshold(log) ? "OFFLINE" : "ONLINE";
+    return isReceiver(log) ? "ONLINE" : log.sensor;
   }
 
   function metricValue(log, field, digits) {
@@ -159,6 +252,11 @@
       firstSelection = false;
     }
     if (!latestByNode.has(selectedNode)) selectedNode = null;
+    if (selectedSession === latestSessionId(selectedNode)) selectedSession = null;
+    if (selectedSession !== null && !getNodeSessions(selectedNode).some((session) => session.id === selectedSession)) {
+      selectedSession = null;
+      sessionNotice = "選択Sessionが取得範囲から外れたため、現在Sessionを表示しています。";
+    }
     renderNodeChips();
     renderOverview();
     updateUrl();
@@ -169,7 +267,7 @@
     const container = byId("node-chips");
     container.replaceChildren();
     nodeChips = [];
-    for (const node of [null, ...[...latestByNode.keys()].sort((a, b) => a.localeCompare(b, "ja", { numeric: true }))]) {
+    for (const node of [null, ...[...latestByNode.keys()].sort(compareNodes)]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "node-chip";
@@ -180,7 +278,7 @@
       name.textContent = node ?? "ALL";
       button.append(name);
       const log = latestByNode.get(node);
-      const stateBadge = log ? badge(nodeState(log), sensorTones[nodeState(log)]) : null;
+      const stateBadge = log ? badge(isNodePaused(node) ? "PAUSED" : nodeState(log), isNodePaused(node) ? "neutral" : sensorTones[nodeState(log)]) : null;
       if (stateBadge) button.append(stateBadge);
       button.addEventListener("click", () => selectNode(node));
       nodeChips.push({ node, button, stateBadge, log });
@@ -190,6 +288,9 @@
   }
 
   function selectNode(node) {
+    selectedSession = null;
+    sessionHistoryFiltered = false;
+    sessionNotice = "";
     selectedNode = latestByNode.has(node) ? node : null;
     for (const chip of nodeChips) chip.button.setAttribute("aria-pressed", String(chip.node === selectedNode));
     updateUrl();
@@ -216,16 +317,22 @@
     list.replaceChildren();
     overviewStates = [];
     byId("overview-empty").hidden = latestByNode.size > 0;
-    for (const [node, log] of [...latestByNode].sort(([a], [b]) => a.localeCompare(b, "ja", { numeric: true }))) {
+    for (const [node, log] of [...latestByNode].sort(([a], [b]) => compareNodes(a, b))) {
       const button = document.createElement("button");
       button.type = "button";
-      const state = nodeState(log);
-      button.className = `node-summary tone-${sensorTones[state]}`;
+      const state = isNodePaused(node) ? "PAUSED" : nodeState(log);
+      button.className = `node-summary tone-${sensorTones[state] ?? "neutral"}`;
       button.dataset.node = node;
       button.setAttribute("aria-label", `${node} ${state}、最終受信 ${formatJst(log.timestamp)} JST。詳細を表示`);
       const name = document.createElement("span");
       name.className = "summary-node";
       name.textContent = node;
+      if (!isReceiverNode(node)) {
+        const prediction = document.createElement("small");
+        prediction.className = "summary-prediction";
+        prediction.textContent = `次回検知予測: ${predictionText(node, log.sessionId)}`;
+        name.append(prediction);
+      }
       const battery = document.createElement("span");
       battery.className = "summary-battery";
       const batteryState = log.battery === null ? "INVALID" : log.batteryStatus;
@@ -236,7 +343,7 @@
       const time = document.createElement("time");
       time.className = "summary-time";
       setReceivedTime(time, log);
-      const stateBadge = badge(state, sensorTones[state]);
+      const stateBadge = badge(state, sensorTones[state] ?? "neutral");
       button.append(name, stateBadge, battery, lora, time);
       overviewStates.push({ button, stateBadge, log });
       button.addEventListener("click", () => selectNode(node));
@@ -252,6 +359,7 @@
     focusNode = null;
     let newest = -Infinity;
     for (const [node, log] of latestByNode) {
+      if (isReceiverNode(node) || isNodePaused(node)) continue;
       const timestamp = log.timestamp ?? -Infinity;
       // 同時刻・全件日時不明の場合はNode名順で安定させる。配列の並びには依存しない。
       if (focusNode === null || timestamp > newest || (timestamp === newest && node.localeCompare(focusNode, "ja", { numeric: true }) < 0)) {
@@ -262,9 +370,9 @@
   }
 
   function renderCurrent() {
-    const latest = latestByNode.get(focusNode);
+    const latest = displayLog();
     const all = selectedNode === null;
-    byId("current-heading").textContent = "最新の状態";
+    byId("current-heading").textContent = selectedSession === null ? "最新の状態" : "PAST SESSION";
     byId("all-overview").hidden = !all;
     byId("single-overview").hidden = false;
     byId("detail-section").hidden = false;
@@ -288,49 +396,48 @@
   }
 
   function renderNodeStates() {
-    const state = nodeState(latestByNode.get(focusNode));
-    byId("sensor-card").className = `sensor-card tone-${sensorTones[state]}`;
+    const state = nodeState(displayLog());
+    byId("sensor-card").className = `sensor-card tone-${sensorTones[state] ?? "neutral"}`;
     if (byId("sensor-value").textContent !== state) byId("sensor-value").textContent = state;
     for (const { button, stateBadge, log } of overviewStates) {
-      const current = nodeState(log);
+      const current = isNodePaused(log.node) ? "PAUSED" : nodeState(log);
       if (stateBadge.textContent === current) continue;
       stateBadge.textContent = current;
-      stateBadge.className = `badge tone-${sensorTones[current]}`;
-      button.className = `node-summary tone-${sensorTones[current]}`;
+      stateBadge.className = `badge tone-${sensorTones[current] ?? "neutral"}`;
+      button.className = `node-summary tone-${sensorTones[current] ?? "neutral"}`;
       button.setAttribute("aria-label", `${log.node} ${current}、最終受信 ${formatJst(log.timestamp)} JST。詳細を表示`);
     }
     for (const { stateBadge, log } of nodeChips) {
       if (!stateBadge) continue;
-      const current = nodeState(log);
+      const current = isNodePaused(log.node) ? "PAUSED" : nodeState(log);
       if (stateBadge.textContent === current) continue;
       stateBadge.textContent = current;
-      stateBadge.className = `badge tone-${sensorTones[current]}`;
+      stateBadge.className = `badge tone-${sensorTones[current] ?? "neutral"}`;
     }
-    const latest = latestByNode.get(focusNode);
-    const age = latest?.timestamp == null ? null : Date.now() - latest.timestamp;
-    byId("received-age").className = age === null || age < 0 ? "freshness-unknown" : age >= warningThreshold(latest) ? "freshness-stale" : age >= warningThreshold(latest) / 2 ? "freshness-warning" : "freshness-fresh";
+    byId("received-age").className = "";
   }
 
   function renderAlerts() {
     const alerts = byId("alerts");
     const messages = [];
-    const targets = selectedNode === null ? [...latestByNode.values()] : [latestByNode.get(selectedNode)].filter(Boolean);
+    const targets = selectedNode === null ? [...latestByNode.values()].filter((log) => !isNodePaused(log.node)) : [displayLog()].filter(Boolean);
     function add(log, message, danger = false) {
       messages.push({ text: `${log.node} · ${message}`, danger });
     }
     for (const latest of targets) {
+      if (latest.event === "SENSOR_FAULT" || latest.sensor === "FAULT") add(latest, "SENSOR_FAULT", true);
       if (nodeState(latest) === "OPEN") add(latest, "状態：OPEN。", true);
       if (latest.timestamp === null) {
-        add(latest, "受信日時が不明です。無通信時間を判定できません。");
+        add(latest, "受信日時が不明です。日時を判定できません。");
       } else {
         const age = Date.now() - latest.timestamp;
         if (age < 0) add(latest, "受信日時が未来です。記録時刻を確認してください。");
-        if (age >= warningThreshold(latest)) add(latest, `無通信警告：最終受信から${Math.floor(age / 60000)}分経過しています。`, true);
+
       }
       if (latest.battery !== null && ["LOW", "CRITICAL"].includes(latest.batteryStatus)) add(latest, `電池警告：${latest.batteryStatus}。電池を確認してください。`, latest.batteryStatus === "CRITICAL");
       if (latest.temperature !== null && ["HOT", "CRITICAL"].includes(latest.temperatureStatus)) add(latest, `温度警告：${latest.temperatureStatus}。`, latest.temperatureStatus === "CRITICAL");
     }
-    byId("received-age").textContent = receivedAge(latestByNode.get(focusNode));
+    byId("received-age").textContent = receivedAge(displayLog());
     // 同じ警告を毎秒aria-liveへ再挿入しない。
     const signature = JSON.stringify(messages);
     if (signature === lastAlertSignature) return;
@@ -347,12 +454,14 @@
 
   function renderView() {
     updateFocusNode();
+    renderNodeControls();
     renderCurrent();
     renderHistory();
     renderCharts();
   }
 
   function renderHistory() {
+    byId("history-scope").textContent = selectedNode !== null && sessionHistoryFiltered && !isReceiverNode(selectedNode) ? "選択Session" : "全Session";
     const body = byId("history-body");
     body.replaceChildren();
     const filtered = visibleLogs();
@@ -404,9 +513,9 @@
   function renderCharts() {
     const all = selectedNode === null;
     const nodes = (all ? [...latestByNode.keys()] : [selectedNode])
-      .filter((node) => !node.startsWith("receiver-"))
-      .sort((a, b) => a.localeCompare(b, "ja", { numeric: true }));
-    const sessions = new Map(nodes.map((node) => [node, latestSessionId(node)]));
+      .filter((node) => !isReceiverNode(node))
+      .sort(compareNodes);
+    const sessions = new Map(nodes.map((node) => [node, selectedNode !== null && selectedSession !== null ? selectedSession : latestSessionId(node)]));
     const series = new Map(nodes.map((node) => [node, []]));
     let invalidDates = 0;
     // Group once in chronological order for all three charts.
@@ -579,6 +688,17 @@
   byId("demo-notice").hidden = !demo;
   if (config.USE_DEMO_DATA) byId("demo-notice").querySelector("a").hidden = true;
   byId("setup-notice").hidden = demo || configured;
+  byId("session-select").addEventListener("change", () => {
+    selectedSession = byId("session-select").value || null;
+    sessionHistoryFiltered = true;
+    sessionNotice = "";
+    renderView();
+  });
+  byId("current-session-button").addEventListener("click", () => { selectedSession = null; sessionHistoryFiltered = true; sessionNotice = ""; renderView(); });
+  byId("pause-button").addEventListener("click", toggleNodePause);
+  window.addEventListener("storage", (event) => {
+    if (event.key === pauseKey || event.key === null) { pausedNodes = readPausedNodes(); renderNodeChips(); renderOverview(); renderView(); }
+  });
   byId("refresh-button").addEventListener("click", refresh);
   window.addEventListener("popstate", () => {
     const node = new URLSearchParams(window.location.search).get("node");

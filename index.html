@@ -25,6 +25,14 @@
       <div class="node-toolbar">
         <div id="node-chips" class="node-chips" role="group" aria-label="Node選択"><button class="node-chip" type="button" data-node="" aria-pressed="true">ALL</button></div>
       </div>
+      <div id="node-controls" class="node-controls" hidden>
+        <label for="session-select">Session <small>取得済みログの範囲</small></label>
+        <select id="session-select" aria-label="Session選択"></select>
+        <button id="current-session-button" type="button" hidden>現在Sessionへ</button>
+        <button id="pause-button" type="button">一時停止</button><small id="pause-note">このブラウザのみ</small>
+        <small id="session-notice" role="status"></small>
+      </div>
+      <p id="prediction" class="prediction" hidden><span>次回検知予測</span><span id="prediction-value"></span></p>
       <aside id="demo-notice" class="notice demo-notice" hidden><strong>デモ表示中</strong><span>サンプルデータです。</span><a href="./">通常表示へ</a></aside>
       <aside id="setup-notice" class="notice" hidden><strong>データの接続準備中</strong><a href="?demo=1">デモを見る</a></aside>
       <div id="update-error" class="notice error-notice" role="alert" hidden></div>
@@ -77,7 +85,7 @@
       </section>
 
       <section aria-labelledby="history-heading">
-        <div class="section-heading"><h2 id="history-heading">イベント履歴</h2><p id="history-count">直近0件</p></div>
+        <div class="section-heading"><h2 id="history-heading">イベント履歴</h2><small id="history-scope"></small><p id="history-count">直近0件</p></div>
         <div class="history-panel">
           <div class="table-scroll" tabindex="0" role="region" aria-label="受信履歴">
             <table><caption class="visually-hidden">直近50件の受信ログ。日時はJST。</caption><thead><tr><th scope="col">受信時刻 <small>JST</small></th><th scope="col">Node</th><th scope="col">Session</th><th scope="col">イベント</th><th scope="col">状態</th><th scope="col">Battery</th><th scope="col">温度</th><th scope="col">LoRa RSSI</th></tr></thead><tbody id="history-body"><tr><td colspan="8" class="empty-row">受信ログはありません</td></tr></tbody></table>
